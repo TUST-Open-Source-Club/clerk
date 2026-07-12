@@ -168,7 +168,7 @@ impl LlmClient for OpenAiClient {
         if !tools.is_empty() {
             builder.tools(tools);
         }
-        builder.temperature(0.7);
+        builder.temperature(0.7_f32);
 
         let request = builder.build().context("构建 LLM 请求失败")?;
 

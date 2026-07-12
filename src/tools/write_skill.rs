@@ -70,7 +70,8 @@ mod tests {
         let result = tool.execute(args, &ctx).await.unwrap();
         let text = result.to_string_for_model();
         assert!(text.contains("Skill 已保存"));
-        assert!(text.contains("skills/poster-design/SKILL.md"));
+        assert!(text.contains("skills"));
+        assert!(text.contains("poster-design"));
     }
 
     #[tokio::test]

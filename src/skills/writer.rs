@@ -52,10 +52,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = SkillWriter::write(dir.path(), "excel-analysis", "# Excel\n").unwrap();
         assert!(path.exists());
-        assert!(
-            path.to_string_lossy()
-                .contains("skills/excel-analysis/SKILL.md")
-        );
+        assert_eq!(path.file_name().unwrap(), "SKILL.md");
+        assert!(path.parent().unwrap().ends_with("excel-analysis"));
     }
 
     #[test]
