@@ -207,12 +207,10 @@ mod tests {
     #[tokio::test]
     #[cfg(windows)]
     async fn test_stdio_transport_receive_on_windows() {
-        let mut transport = StdioTransport::spawn("cmd", &[
-            "/c".to_string(),
-            "echo hello".to_string(),
-        ])
-        .await
-        .unwrap();
+        let mut transport =
+            StdioTransport::spawn("cmd", &["/c".to_string(), "echo hello".to_string()])
+                .await
+                .unwrap();
         let first = transport.receive().await.unwrap();
         assert_eq!(first, Some("hello".to_string()));
         transport.close().await.unwrap();
