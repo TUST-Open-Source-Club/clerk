@@ -1,0 +1,30 @@
+[package]
+name = "clerk"
+version = "0.1.0"
+edition = "2024"
+description = "A terminal-based office AI agent built with Rust"
+license = "MIT"
+repository = "https://github.com/mikesolar/clerk"
+
+[dependencies]
+tokio = { version = "1.44", features = ["full"] }
+ratatui = "0.29"
+crossterm = "0.28"
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "chrono"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.16", features = ["v4"] }
+unicode-width = "0.2"
+unicode-segmentation = "1.12"
+directories = "6.0"
+
+[dev-dependencies]
+tempfile = "3.14"
+wiremock = "0.6"

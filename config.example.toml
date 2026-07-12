@@ -1,0 +1,17 @@
+# Clerk 配置文件示例
+# 复制到 ~/.config/clerk/config.toml 并按需修改
+
+[llm]
+model = "gpt-4o-mini"
+base_url = "https://api.openai.com/v1"
+api_key = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+timeout_seconds = 60
+
+[tui]
+theme = "default"
+show_sidebar = true
+
+[storage]
+# db_path = "/path/to/clerk.db"
+
+# working_dir = "/path/to/workspace"
