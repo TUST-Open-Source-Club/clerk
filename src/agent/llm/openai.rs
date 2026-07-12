@@ -20,6 +20,7 @@ use crate::agent::llm::client::{
 pub struct OpenAiClient {
     client: Client<OpenAIConfig>,
     api_key: String,
+    api_base: String,
     model: String,
     timeout: Duration,
 }
@@ -35,11 +36,12 @@ impl OpenAiClient {
         let base_url = base_url.into();
         let config = OpenAIConfig::new()
             .with_api_key(api_key.clone())
-            .with_api_base(base_url);
+            .with_api_base(base_url.clone());
 
         Ok(Self {
             client: Client::with_config(config),
             api_key,
+            api_base: base_url,
             model: model.into(),
             timeout: Duration::from_secs(timeout_seconds.max(5)),
         })
@@ -178,7 +180,12 @@ impl LlmClient for OpenAiClient {
         let response = tokio::time::timeout(self.timeout, self.client.chat().create(request))
             .await
             .context("LLM 请求超时")?
-            .context("请求 LLM 失败")?;
+            .with_context(|| {
+                format!(
+                    "请求 LLM 失败 (base_url={}, model={})",
+                    self.api_base, self.model
+                )
+            })?;
 
         let choice = response
             .choices
@@ -210,5 +217,180 @@ mod tests {
             ChatCompletionRequestMessage::User(_) => {}
             _ => panic!("期望 User 消息"),
         }
+    }
+
+    #[test]
+    fn test_convert_system_message() {
+        let msg = Message::system("sys");
+        let converted = OpenAiClient::convert_message(msg);
+        assert!(matches!(converted, ChatCompletionRequestMessage::System(_)));
+    }
+
+    #[test]
+    fn test_convert_tool_message() {
+        let msg = Message::tool("1", "result");
+        let converted = OpenAiClient::convert_message(msg);
+        assert!(matches!(converted, ChatCompletionRequestMessage::Tool(_)));
+    }
+
+    #[test]
+    fn test_convert_assistant_message() {
+        let msg = Message::assistant("reply");
+        let converted = OpenAiClient::convert_message(msg);
+        assert!(matches!(
+            converted,
+            ChatCompletionRequestMessage::Assistant(_)
+        ));
+    }
+
+    #[test]
+    fn test_convert_assistant_with_tool_calls() {
+        let mut msg = Message::assistant("");
+        msg.tool_calls = Some(vec![ToolCall {
+            id: "1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "fake".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }]);
+        let converted = OpenAiClient::convert_message(msg);
+        assert!(matches!(
+            converted,
+            ChatCompletionRequestMessage::Assistant(_)
+        ));
+    }
+
+    #[test]
+    fn test_convert_tool() {
+        let tool = ToolDefinition {
+            tool_type: "function".to_string(),
+            function: crate::agent::llm::FunctionDefinition {
+                name: "read".to_string(),
+                description: "read".to_string(),
+                parameters: serde_json::json!({}),
+            },
+        };
+        let converted = OpenAiClient::convert_tool(tool);
+        assert!(matches!(converted.r#type, ChatCompletionToolType::Function));
+    }
+
+    #[test]
+    fn test_extract_response_text() {
+        let choice = async_openai::types::ChatChoice {
+            index: 0,
+            message: async_openai::types::ChatCompletionResponseMessage {
+                content: Some("hello".to_string()),
+                role: async_openai::types::Role::Assistant,
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                audio: None,
+            },
+            logprobs: None,
+            finish_reason: None,
+        };
+        match OpenAiClient::extract_response(choice) {
+            LlmResponse::Text(t) => assert_eq!(t, "hello"),
+            _ => panic!("期望 Text 响应"),
+        }
+    }
+
+    #[test]
+    fn test_extract_response_tool_calls() {
+        let choice = async_openai::types::ChatChoice {
+            index: 0,
+            message: async_openai::types::ChatCompletionResponseMessage {
+                content: None,
+                role: async_openai::types::Role::Assistant,
+                tool_calls: Some(vec![async_openai::types::ChatCompletionMessageToolCall {
+                    id: "1".to_string(),
+                    r#type: ChatCompletionToolType::Function,
+                    function: async_openai::types::FunctionCall {
+                        name: "fake".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                function_call: None,
+                refusal: None,
+                audio: None,
+            },
+            logprobs: None,
+            finish_reason: None,
+        };
+        match OpenAiClient::extract_response(choice) {
+            LlmResponse::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].function.name, "fake");
+            }
+            _ => panic!("期望 ToolCalls 响应"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chat_with_empty_key() {
+        let client = OpenAiClient::new("http://localhost", "", "gpt-4o-mini", 30).unwrap();
+        let result = client.chat(vec![], vec![]).await.unwrap();
+        match result {
+            LlmResponse::Text(t) => assert!(t.contains("API key 未配置")),
+            _ => panic!("期望提示文本"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chat_with_wiremock_success() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1700000000,
+            "model": "gpt-4o-mini",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "hello from mock"
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 3,
+                "total_tokens": 13
+            }
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(body),
+            )
+            .mount(&server)
+            .await;
+
+        let client = OpenAiClient::new(server.uri(), "sk-test", "gpt-4o-mini", 30).unwrap();
+
+        let result = client
+            .chat(vec![Message::user("hi")], vec![])
+            .await
+            .unwrap();
+
+        match result {
+            LlmResponse::Text(t) => assert_eq!(t, "hello from mock"),
+            _ => panic!("期望 Text 响应"),
+        }
+    }
+
+    #[test]
+    fn test_timeout_minimum() {
+        let client = OpenAiClient::new("http://localhost", "sk", "m", 1).unwrap();
+        assert_eq!(client.timeout, Duration::from_secs(5));
     }
 }

@@ -127,5 +127,71 @@ mod tests {
     fn test_mm_to_cm() {
         assert!((mm_to_cm("210mm").unwrap() - 21.0).abs() < f64::EPSILON);
         assert!((mm_to_cm("29.7cm").unwrap() - 29.7).abs() < f64::EPSILON);
+        assert!((mm_to_cm("10").unwrap() - 10.0).abs() < f64::EPSILON);
+        assert!(mm_to_cm("abc").is_err());
+        assert!(mm_to_cm("10xx").is_err());
+    }
+
+    #[test]
+    fn test_resolve_output_path() {
+        let wd = std::path::PathBuf::from("/tmp");
+        assert_eq!(
+            resolve_path(&wd, "a.png").unwrap(),
+            std::path::PathBuf::from("/tmp/a.png")
+        );
+        assert_eq!(
+            resolve_path(&wd, "/abs/a.png").unwrap(),
+            std::path::PathBuf::from("/abs/a.png")
+        );
+    }
+
+    #[test]
+    fn test_name() {
+        let tool = PosterTool;
+        assert_eq!(tool.name(), "poster");
+    }
+
+    #[test]
+    fn test_description() {
+        let tool = PosterTool;
+        assert!(!tool.description().is_empty());
+    }
+
+    #[test]
+    fn test_schema() {
+        let tool = PosterTool;
+        let schema = tool.schema();
+        assert_eq!(schema.name, "poster");
+        let props = schema
+            .parameters
+            .get("properties")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        assert!(props.contains_key("input"));
+        assert!(props.contains_key("output"));
+    }
+
+    #[tokio::test]
+    async fn test_poster_execute_missing_input() {
+        let tool = PosterTool;
+        let result = tool.execute(HashMap::new(), &ToolContext::default()).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("input"));
+    }
+
+    #[tokio::test]
+    async fn test_poster_execute_missing_output() {
+        let tool = PosterTool;
+        let mut args = HashMap::new();
+        args.insert(
+            "input".to_string(),
+            Value::String("/tmp/input.html".to_string()),
+        );
+        let result = tool.execute(args, &ToolContext::default()).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("output"));
     }
 }

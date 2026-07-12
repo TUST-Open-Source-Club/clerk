@@ -132,6 +132,7 @@ impl ReActRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::llm::client::Role;
     use crate::agent::llm::{LlmResponse, Message, ToolCall, ToolDefinition};
     use crate::tools::registry::ToolRegistry;
     use crate::tools::schema::{Tool, ToolContext, ToolResult, ToolSchema};
@@ -182,7 +183,7 @@ mod tests {
             responses: Mutex::new(vec![LlmResponse::Text("hi".to_string())]),
         });
         let mut registry = ToolRegistry::new(ToolContext::default());
-        registry.register(Box::new(FakeTool));
+        registry.register(Arc::new(FakeTool));
         let runner = ReActRunner::new(client, Arc::new(Mutex::new(registry)));
         let mut ctx = SessionContext::new("sys");
 
@@ -207,11 +208,119 @@ mod tests {
             ]),
         });
         let mut registry = ToolRegistry::new(ToolContext::default());
-        registry.register(Box::new(FakeTool));
+        registry.register(Arc::new(FakeTool));
         let runner = ReActRunner::new(client, Arc::new(Mutex::new(registry)));
         let mut ctx = SessionContext::new("sys");
 
         let result = runner.run(&mut ctx, "call", None).await.unwrap();
         assert_eq!(result, "result");
+    }
+
+    #[tokio::test]
+    async fn test_run_max_iterations() {
+        let client = Arc::new(FakeLlm {
+            responses: Mutex::new(
+                (0..3)
+                    .map(|_| {
+                        LlmResponse::ToolCalls(vec![ToolCall {
+                            id: "1".to_string(),
+                            call_type: "function".to_string(),
+                            function: crate::agent::llm::FunctionCall {
+                                name: "fake".to_string(),
+                                arguments: "{}".to_string(),
+                            },
+                        }])
+                    })
+                    .collect(),
+            ),
+        });
+        let mut registry = ToolRegistry::new(ToolContext::default());
+        registry.register(Arc::new(FakeTool));
+        let runner =
+            ReActRunner::new(client, Arc::new(Mutex::new(registry))).with_max_iterations(3);
+        let mut ctx = SessionContext::new("sys");
+
+        let result = runner.run(&mut ctx, "call", None).await.unwrap();
+        assert_eq!(result, "达到最大工具调用次数限制，请简化请求。");
+    }
+
+    #[tokio::test]
+    async fn test_run_tool_failure() {
+        let client = Arc::new(FakeLlm {
+            responses: Mutex::new(vec![
+                LlmResponse::ToolCalls(vec![ToolCall {
+                    id: "1".to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::agent::llm::FunctionCall {
+                        name: "unknown".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                LlmResponse::Text("fallback".to_string()),
+            ]),
+        });
+        let registry = ToolRegistry::new(ToolContext::default());
+        let runner = ReActRunner::new(client, Arc::new(Mutex::new(registry)));
+        let mut ctx = SessionContext::new("sys");
+
+        let result = runner.run(&mut ctx, "call", None).await.unwrap();
+        assert_eq!(result, "fallback");
+
+        let tool_contents: Vec<String> = ctx
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, Role::Tool))
+            .map(|m| m.content.clone())
+            .collect();
+        assert!(tool_contents.iter().any(|c| c.contains("工具执行失败")));
+        assert!(tool_contents.iter().any(|c| c.contains("未知工具")));
+    }
+
+    #[tokio::test]
+    async fn test_run_event_channel() {
+        let client = Arc::new(FakeLlm {
+            responses: Mutex::new(vec![
+                LlmResponse::ToolCalls(vec![ToolCall {
+                    id: "1".to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::agent::llm::FunctionCall {
+                        name: "fake".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                LlmResponse::Text("done".to_string()),
+            ]),
+        });
+        let mut registry = ToolRegistry::new(ToolContext::default());
+        registry.register(Arc::new(FakeTool));
+        let runner = ReActRunner::new(client, Arc::new(Mutex::new(registry)));
+        let mut ctx = SessionContext::new("sys");
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
+
+        let result = runner.run(&mut ctx, "call", Some(event_tx)).await.unwrap();
+        assert_eq!(result, "done");
+
+        let mut saw_tool_call = false;
+        let mut saw_tool_result = false;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                RunnerEvent::ToolCall { name, .. } if name == "fake" => saw_tool_call = true,
+                RunnerEvent::ToolResult { name, .. } if name == "fake" => saw_tool_result = true,
+                _ => {}
+            }
+        }
+        assert!(saw_tool_call, "should receive ToolCall event");
+        assert!(saw_tool_result, "should receive ToolResult event");
+    }
+
+    #[test]
+    fn test_with_max_iterations() {
+        let client = Arc::new(FakeLlm {
+            responses: Mutex::new(vec![]),
+        });
+        let registry = ToolRegistry::new(ToolContext::default());
+        let runner =
+            ReActRunner::new(client, Arc::new(Mutex::new(registry))).with_max_iterations(42);
+        assert_eq!(runner.max_iterations, 42);
     }
 }

@@ -1,3 +1,4 @@
 /target
 .idea/
 clippy_errors.txt
+config.toml

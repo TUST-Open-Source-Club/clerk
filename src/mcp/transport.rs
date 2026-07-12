@@ -148,6 +148,66 @@ mod tests {
         let transport = SseTransport::new("http://localhost:3000/");
         assert_eq!(transport.endpoint, "http://localhost:3000");
     }
+
+    #[tokio::test]
+    async fn test_sse_transport_connect_and_close() {
+        let mut transport = SseTransport::new("http://localhost:3000/");
+        transport.connect().await.unwrap();
+        assert_eq!(
+            transport.message_endpoint,
+            Some("http://localhost:3000/message".to_string())
+        );
+        transport.close().await.unwrap();
+        assert!(transport.message_endpoint.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_sse_transport_receive_from_buffer() {
+        let mut transport = SseTransport::new("http://localhost:3000/");
+        transport.event_buffer.push("event".to_string());
+        let result = transport.receive().await.unwrap();
+        assert_eq!(result, Some("event".to_string()));
+        assert!(transport.event_buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_stdio_transport_spawn_failure() {
+        let result = StdioTransport::spawn("/nonexistent/command", &[]).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_stdio_transport_send_receive() {
+        // 使用一个会读取 stdin 再输出固定文本的命令，确保 send 时管道仍然打开。
+        let mut transport =
+            StdioTransport::spawn("sh", &["-c".to_string(), "read x; echo hello".to_string()])
+                .await
+                .unwrap();
+        let request = JsonRpcRequest::new(1, "test", None);
+        transport.send(request).await.unwrap();
+        let line = transport.receive().await.unwrap();
+        assert_eq!(line, Some("hello".to_string()));
+        transport.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_stdio_transport_receive_eof() {
+        let mut transport = StdioTransport::spawn("echo", &["hello".to_string()])
+            .await
+            .unwrap();
+        let first = transport.receive().await.unwrap();
+        assert_eq!(first, Some("hello".to_string()));
+        let second = transport.receive().await.unwrap();
+        assert_eq!(second, None);
+        transport.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sse_transport_receive_empty_when_not_connected() {
+        let mut transport = SseTransport::new("http://localhost:3000/");
+        let result = transport.receive().await.unwrap();
+        assert_eq!(result, None);
+    }
 }
 
 #[cfg(test)]

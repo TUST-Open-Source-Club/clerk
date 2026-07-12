@@ -104,17 +104,52 @@ mod tests {
     }
 
     #[test]
-    fn test_load_all_layers() {
-        let builtin = TempDir::new().unwrap();
-        let user = TempDir::new().unwrap();
-        let project = TempDir::new().unwrap();
+    fn test_load_from_missing_dir() {
+        let mut skills = Vec::new();
+        SkillLoader::load_from_dir(Path::new("/nonexistent"), &mut skills).unwrap();
+        assert!(skills.is_empty());
+    }
 
+    #[test]
+    fn test_load_from_nested_skill_dir() {
+        let dir = TempDir::new().unwrap();
+        let skill_dir = dir.path().join("excel");
+        fs::create_dir(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "---\nname: excel\n---\n").unwrap();
+
+        let mut skills = Vec::new();
+        SkillLoader::load_from_dir(dir.path(), &mut skills).unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].meta.name, "excel");
+    }
+
+    #[test]
+    fn test_load_file_failure() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bad.md");
+        fs::write(&path, "---\nunclosed frontmatter").unwrap();
+        assert!(SkillLoader::load_file(&path).is_err());
+    }
+
+    #[test]
+    fn test_load_all_without_user_dir() {
+        let builtin = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
         fs::write(builtin.path().join("SKILL.md"), "---\nname: builtin\n---\n").unwrap();
-        fs::write(user.path().join("SKILL.md"), "---\nname: user\n---\n").unwrap();
         fs::write(project.path().join("SKILL.md"), "---\nname: project\n---\n").unwrap();
 
-        let skills =
-            SkillLoader::load_all(builtin.path(), Some(user.path()), Some(project.path())).unwrap();
+        let skills = SkillLoader::load_all(builtin.path(), None, Some(project.path())).unwrap();
         assert_eq!(skills.len(), 3);
+    }
+
+    #[test]
+    fn test_load_agents_md() {
+        let project = TempDir::new().unwrap();
+        let project_root = project.path().parent().unwrap();
+        fs::write(project_root.join("AGENTS.md"), "---\nname: agents\n---\n").unwrap();
+
+        let agents = SkillLoader::load_agents_md(project.path());
+        assert!(agents.is_some());
+        assert_eq!(agents.unwrap().meta.name, "agents");
     }
 }

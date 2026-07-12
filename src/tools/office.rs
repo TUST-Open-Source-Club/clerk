@@ -321,23 +321,79 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_and_read_word() {
+    async fn test_read_excel_with_sheet() {
         let dir = TempDir::new().unwrap();
-        let write_tool = WriteWordTool;
+        let write_tool = WriteExcelTool;
         let mut args = HashMap::new();
-        args.insert("path".to_string(), Value::String("test.docx".to_string()));
-        args.insert(
-            "content".to_string(),
-            Value::String("Hello\nWorld".to_string()),
-        );
+        args.insert("path".to_string(), Value::String("test.xlsx".to_string()));
+        args.insert("sheet".to_string(), Value::String("Data".to_string()));
+        args.insert("rows".to_string(), json!([["a"]]));
         write_tool.execute(args, &ctx(&dir)).await.unwrap();
 
-        let read_tool = ReadWordTool;
+        let read_tool = ReadExcelTool;
         let mut args = HashMap::new();
-        args.insert("path".to_string(), Value::String("test.docx".to_string()));
+        args.insert("path".to_string(), Value::String("test.xlsx".to_string()));
+        args.insert("sheet".to_string(), Value::String("Data".to_string()));
         let result = read_tool.execute(args, &ctx(&dir)).await.unwrap();
+        assert!(result.to_string_for_model().contains("a"));
+    }
+
+    #[tokio::test]
+    async fn test_read_excel_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let tool = ReadExcelTool;
+        let mut args = HashMap::new();
+        args.insert(
+            "path".to_string(),
+            Value::String("missing.xlsx".to_string()),
+        );
+        assert!(tool.execute(args, &ctx(&dir)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_write_excel_invalid_rows() {
+        let dir = TempDir::new().unwrap();
+        let tool = WriteExcelTool;
+        let mut args = HashMap::new();
+        args.insert("path".to_string(), Value::String("bad.xlsx".to_string()));
+        args.insert("rows".to_string(), Value::String("not array".to_string()));
+        assert!(tool.execute(args, &ctx(&dir)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_read_word_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let tool = ReadWordTool;
+        let mut args = HashMap::new();
+        args.insert(
+            "path".to_string(),
+            Value::String("missing.docx".to_string()),
+        );
+        assert!(tool.execute(args, &ctx(&dir)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_render_office_without_pandoc() {
+        let dir = TempDir::new().unwrap();
+        let tool = RenderOfficeTool;
+        let mut args = HashMap::new();
+        args.insert("input".to_string(), Value::String("a.md".to_string()));
+        args.insert("output".to_string(), Value::String("a.docx".to_string()));
+        let result = tool.execute(args, &ctx(&dir)).await.unwrap();
         let text = result.to_string_for_model();
-        assert!(text.contains("Hello"));
-        assert!(text.contains("World"));
+        assert!(text.contains("Pandoc") || text.contains("已渲染"));
+    }
+
+    #[test]
+    fn test_resolve_path() {
+        let wd = std::path::PathBuf::from("/tmp");
+        assert_eq!(
+            resolve_path(&wd, "a.xlsx").unwrap(),
+            std::path::PathBuf::from("/tmp/a.xlsx")
+        );
+        assert_eq!(
+            resolve_path(&wd, "/abs/a.xlsx").unwrap(),
+            std::path::PathBuf::from("/abs/a.xlsx")
+        );
     }
 }

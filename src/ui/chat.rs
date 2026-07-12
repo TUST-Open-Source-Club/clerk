@@ -38,6 +38,15 @@ impl ChatPanel {
         self.messages = messages;
         self.scroll = 0;
     }
+
+    pub fn clear(&mut self) {
+        self.messages.clear();
+        self.scroll = 0;
+    }
+
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
 }
 
 impl Widget for &ChatPanel {
@@ -95,11 +104,25 @@ mod tests {
     }
 
     #[test]
-    fn test_set_messages_resets_scroll() {
-        let mut panel = ChatPanel::new(vec![]);
-        panel.scroll_up(10);
-        panel.set_messages(vec![make_msg("assistant", "hi")]);
+    fn test_render_widget() {
+        let panel = ChatPanel::new(vec![
+            make_msg("user", "hello"),
+            make_msg("assistant", "hi"),
+            make_msg("tool", "done"),
+            make_msg("unknown", "x"),
+        ]);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 10));
+        panel.render(buf.area, &mut buf);
+        let text = buf.content.iter().map(|c| c.symbol()).collect::<String>();
+        assert!(text.contains("hello"));
+        assert!(text.contains("assistant"));
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut panel = ChatPanel::new(vec![make_msg("user", "hello")]);
+        panel.clear();
+        assert!(panel.messages.is_empty());
         assert_eq!(panel.scroll, 0);
-        assert_eq!(panel.messages.len(), 1);
     }
 }

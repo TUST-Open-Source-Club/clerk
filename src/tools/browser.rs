@@ -180,5 +180,78 @@ mod tests {
 
         let path = resolve_output_path(&ctx, Some("a.png"), "out.pdf").unwrap();
         assert_eq!(path, std::path::PathBuf::from("/tmp/a.png"));
+
+        let path = resolve_output_path(&ctx, Some("/abs/a.png"), "out.pdf").unwrap();
+        assert_eq!(path, std::path::PathBuf::from("/abs/a.png"));
+    }
+
+    #[test]
+    fn test_truncate_html() {
+        let html = "<p>hello world</p>";
+        let result = truncate_html(html, 100);
+        assert!(result.contains("hello world"));
+        assert!(!result.contains("截断"));
+
+        let long = "a".repeat(200);
+        let result = truncate_html(&format!("<p>{}</p>", long), 50);
+        assert!(result.contains("截断"));
+    }
+
+    #[test]
+    fn test_name() {
+        let tool = BrowserTool::new();
+        assert_eq!(tool.name(), "browser");
+    }
+
+    #[test]
+    fn test_description() {
+        let tool = BrowserTool::new();
+        assert!(!tool.description().is_empty());
+    }
+
+    #[test]
+    fn test_schema() {
+        let tool = BrowserTool::new();
+        let schema = tool.schema();
+        assert_eq!(schema.name, "browser");
+        let props = schema
+            .parameters
+            .get("properties")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        assert!(props.contains_key("url"));
+        assert!(props.contains_key("action"));
+    }
+
+    #[test]
+    fn test_into_tool_definition() {
+        let tool = BrowserTool::new();
+        let def = tool.schema().into_tool_definition();
+        assert_eq!(def.function.name, "browser");
+        assert_eq!(def.tool_type, "function");
+    }
+
+    #[tokio::test]
+    async fn test_browser_execute_missing_url() {
+        let tool = BrowserTool::new();
+        let result = tool.execute(HashMap::new(), &ToolContext::default()).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("url"));
+    }
+
+    #[tokio::test]
+    async fn test_browser_execute_missing_action() {
+        let tool = BrowserTool::new();
+        let mut args = HashMap::new();
+        args.insert(
+            "url".to_string(),
+            Value::String("https://example.com".to_string()),
+        );
+        let result = tool.execute(args, &ToolContext::default()).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("action"));
     }
 }

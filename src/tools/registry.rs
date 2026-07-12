@@ -1,12 +1,14 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::agent::llm::ToolDefinition;
 use crate::tools::schema::{Tool, ToolContext};
 use serde_json::Value;
 
 /// 工具注册表：管理本地工具与 MCP 工具
+#[derive(Clone)]
 pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn Tool>>,
+    tools: HashMap<String, Arc<dyn Tool>>,
     context: ToolContext,
 }
 
@@ -18,7 +20,7 @@ impl ToolRegistry {
         }
     }
 
-    pub fn register(&mut self, tool: Box<dyn Tool>) {
+    pub fn register(&mut self, tool: Arc<dyn Tool>) {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
@@ -43,6 +45,28 @@ impl ToolRegistry {
 
     pub fn set_context(&mut self, context: ToolContext) {
         self.context = context;
+    }
+
+    /// 移除指定工具，用于构造子 Agent 的工具白名单。
+    pub fn remove(&mut self, name: &str) {
+        self.tools.remove(name);
+    }
+
+    /// 仅保留白名单中的工具，返回自身以便链式调用。
+    pub fn whitelist(&mut self, names: &[String]) -> &mut Self {
+        if names.is_empty() {
+            return self;
+        }
+        let to_remove: Vec<String> = self
+            .tools
+            .keys()
+            .filter(|k| !names.contains(k))
+            .cloned()
+            .collect();
+        for name in to_remove {
+            self.tools.remove(&name);
+        }
+        self
     }
 
     pub async fn execute(
@@ -92,7 +116,7 @@ mod tests {
     #[test]
     fn test_register_and_definitions() {
         let mut registry = ToolRegistry::new(ToolContext::default());
-        registry.register(Box::new(EchoTool));
+        registry.register(Arc::new(EchoTool));
         assert_eq!(registry.names(), vec!["echo"]);
         assert_eq!(registry.tool_definitions().len(), 1);
     }
@@ -100,12 +124,29 @@ mod tests {
     #[tokio::test]
     async fn test_execute() {
         let mut registry = ToolRegistry::new(ToolContext::default());
-        registry.register(Box::new(EchoTool));
+        registry.register(Arc::new(EchoTool));
 
         let mut args = HashMap::new();
         args.insert("msg".to_string(), Value::String("hello".to_string()));
 
         let result = registry.execute("echo", args).await.unwrap();
         assert_eq!(result.to_string_for_model(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_context_and_remove() {
+        let mut registry = ToolRegistry::new(ToolContext::default());
+        registry.register(Arc::new(EchoTool));
+        assert!(registry.context().working_dir.as_os_str().is_empty());
+
+        let new_ctx = ToolContext {
+            working_dir: std::path::PathBuf::from("/tmp"),
+        };
+        registry.set_context(new_ctx.clone());
+        assert_eq!(registry.context().working_dir, new_ctx.working_dir);
+
+        registry.remove("echo");
+        assert!(registry.names().is_empty());
+        assert!(registry.execute("echo", HashMap::new()).await.is_err());
     }
 }

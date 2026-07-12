@@ -1,4 +1,5 @@
 pub mod browser;
+pub mod collaborate;
 pub mod fs;
 pub mod office;
 pub mod pdf;
@@ -6,4 +7,6 @@ pub mod poster;
 pub mod registry;
 pub mod schema;
 pub mod shell;
+pub mod subagent;
 pub mod web;
+pub mod write_skill;

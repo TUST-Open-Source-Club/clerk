@@ -198,17 +198,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_list_dir() {
+    async fn test_read_with_limit() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("a.txt"), "a").unwrap();
+        fs::write(dir.path().join("lines.txt"), "a\nb\nc\n").unwrap();
+
+        let tool = ReadFileTool;
+        let mut args = HashMap::new();
+        args.insert("path".to_string(), Value::String("lines.txt".to_string()));
+        args.insert("limit".to_string(), Value::Number(2.into()));
+        let result = tool.execute(args, &ctx(&dir)).await.unwrap();
+        assert_eq!(result.to_string_for_model(), "a\nb");
+    }
+
+    #[tokio::test]
+    async fn test_read_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let tool = ReadFileTool;
+        let mut args = HashMap::new();
+        args.insert("path".to_string(), Value::String("missing.txt".to_string()));
+        assert!(tool.execute(args, &ctx(&dir)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_write_nested_file() {
+        let dir = TempDir::new().unwrap();
+        let tool = WriteFileTool;
+        let mut args = HashMap::new();
+        args.insert(
+            "path".to_string(),
+            Value::String("sub/dir/file.txt".to_string()),
+        );
+        args.insert("content".to_string(), Value::String("x".to_string()));
+        let result = tool.execute(args, &ctx(&dir)).await.unwrap();
+        assert!(result.to_string_for_model().contains("已写入"));
+        assert!(dir.path().join("sub/dir/file.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_list_recursive() {
+        let dir = TempDir::new().unwrap();
         fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/b.txt"), "b").unwrap();
 
         let tool = ListDirTool;
         let mut args = HashMap::new();
         args.insert("path".to_string(), Value::String(".".to_string()));
+        args.insert("recursive".to_string(), Value::Bool(true));
         let result = tool.execute(args, &ctx(&dir)).await.unwrap();
         let text = result.to_string_for_model();
-        assert!(text.contains("a.txt"));
         assert!(text.contains("sub (dir)"));
+        assert!(text.contains("b.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_list_missing_dir() {
+        let dir = TempDir::new().unwrap();
+        let tool = ListDirTool;
+        let mut args = HashMap::new();
+        args.insert("path".to_string(), Value::String("missing_dir".to_string()));
+        assert!(tool.execute(args, &ctx(&dir)).await.is_err());
+    }
+
+    #[test]
+    fn test_resolve_path() {
+        let wd = std::path::PathBuf::from("/tmp");
+        let p = resolve_path(&wd, "a.txt").unwrap();
+        assert!(p.ends_with("a.txt"));
+        let p = resolve_path(&wd, "/abs/a.txt").unwrap();
+        assert_eq!(p, std::path::PathBuf::from("/abs/a.txt"));
     }
 }

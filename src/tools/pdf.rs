@@ -230,6 +230,14 @@ fn generate_pypdf_merge_script(files: &[PathBuf], output: &std::path::Path) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn ctx(dir: &TempDir) -> ToolContext {
+        ToolContext {
+            working_dir: dir.path().to_path_buf(),
+        }
+    }
 
     #[test]
     fn test_resolve_output_path() {
@@ -238,5 +246,147 @@ mod tests {
         };
         let path = resolve_path(&ctx.working_dir, "a.pdf").unwrap();
         assert_eq!(path, std::path::PathBuf::from("/tmp/a.pdf"));
+
+        let path = resolve_path(&ctx.working_dir, "/abs/a.pdf").unwrap();
+        assert_eq!(path, std::path::PathBuf::from("/abs/a.pdf"));
+    }
+
+    #[test]
+    fn test_generate_pypdf_merge_script() {
+        let files = vec![PathBuf::from("/tmp/a.pdf"), PathBuf::from("/tmp/b.pdf")];
+        let script = generate_pypdf_merge_script(&files, Path::new("/tmp/out.pdf"));
+        assert!(script.contains("PdfWriter"));
+        assert!(script.contains("/tmp/a.pdf"));
+        assert!(script.contains("/tmp/out.pdf"));
+    }
+
+    #[test]
+    fn test_pdf_tool_missing_hint() {
+        let hint = pdf_tool_missing_hint();
+        assert!(hint.contains("pdftk"));
+        assert!(hint.contains("pypdf"));
+    }
+
+    #[tokio::test]
+    async fn test_run_command_success() {
+        let mut cmd = tokio::process::Command::new("echo");
+        cmd.arg("hello");
+        assert!(run_command(cmd).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_merge_pdf_missing_tool() {
+        let dir = TempDir::new().unwrap();
+        let input = dir.path().join("a.pdf");
+        create_minimal_pdf(&input).unwrap();
+
+        let tool = MergePdfTool;
+        let mut args = HashMap::new();
+        args.insert(
+            "files".to_string(),
+            Value::Array(vec![Value::String("a.pdf".to_string())]),
+        );
+        args.insert("output".to_string(), Value::String("out.pdf".to_string()));
+        let result = tool.execute(args, &ctx(&dir)).await;
+        match result {
+            Ok(ToolResult::Text(t)) => assert!(t.contains("已合并")),
+            Ok(ToolResult::Error(e)) => assert!(e.contains("pdftk") || e.contains("pypdf")),
+            Ok(_) => panic!("unexpected result"),
+            Err(e) => panic!("unexpected error: {}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_split_pdf_missing_tool() {
+        let dir = TempDir::new().unwrap();
+        let input = dir.path().join("a.pdf");
+        create_minimal_pdf(&input).unwrap();
+
+        let tool = SplitPdfTool;
+        let mut args = HashMap::new();
+        args.insert("input".to_string(), Value::String("a.pdf".to_string()));
+        args.insert("output".to_string(), Value::String("out.pdf".to_string()));
+        args.insert("start".to_string(), Value::Number(1.into()));
+        args.insert("end".to_string(), Value::Number(1.into()));
+        let result = tool.execute(args, &ctx(&dir)).await;
+        match result {
+            Ok(ToolResult::Text(t)) => assert!(t.contains("已提取")),
+            Ok(ToolResult::Error(e)) => assert!(e.contains("pdftk") || e.contains("pypdf")),
+            Ok(_) => panic!("unexpected result"),
+            Err(e) => panic!("unexpected error: {}", e),
+        }
+    }
+
+    fn create_minimal_pdf(path: &std::path::Path) -> anyhow::Result<()> {
+        use lopdf::{Document, Object, Stream, dictionary};
+        let mut doc = Document::with_version("1.4");
+        let pages_id = doc.new_object_id();
+        let page_id = doc.new_object_id();
+        let resources_id = doc.new_object_id();
+        let content_id = doc.new_object_id();
+
+        doc.objects.insert(
+            resources_id,
+            Object::Dictionary(dictionary! {
+                "Font" => dictionary! {
+                    "F1" => dictionary! {
+                        "Type" => "Font",
+                        "Subtype" => "Type1",
+                        "BaseFont" => "Helvetica",
+                    }
+                }
+            }),
+        );
+
+        let content = Stream::new(
+            dictionary! {
+                "Length" => Object::Integer(0),
+            },
+            vec![],
+        );
+        doc.objects.insert(content_id, Object::Stream(content));
+
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => 1,
+            }),
+        );
+        doc.objects.insert(
+            page_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Page",
+                "Parent" => Object::Reference(pages_id),
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                "Resources" => Object::Reference(resources_id),
+                "Contents" => Object::Reference(content_id),
+            }),
+        );
+        let catalog_id = doc.new_object_id();
+        doc.objects.insert(
+            catalog_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Catalog",
+                "Pages" => Object::Reference(pages_id),
+            }),
+        );
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        doc.save(path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_merge_pdf_invalid_files() {
+        let dir = TempDir::new().unwrap();
+        let tool = MergePdfTool;
+        let mut args = HashMap::new();
+        args.insert(
+            "files".to_string(),
+            Value::Array(vec![Value::Number(42.into())]),
+        );
+        args.insert("output".to_string(), Value::String("out.pdf".to_string()));
+        assert!(tool.execute(args, &ctx(&dir)).await.is_err());
     }
 }

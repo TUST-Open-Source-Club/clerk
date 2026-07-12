@@ -132,6 +132,48 @@ impl McpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    struct FakeTransport {
+        responses: Mutex<Vec<String>>,
+        sent: Mutex<Vec<String>>,
+        closed: Mutex<bool>,
+    }
+
+    impl FakeTransport {
+        fn new(responses: Vec<String>) -> Self {
+            Self {
+                responses: Mutex::new(responses),
+                sent: Mutex::new(Vec::new()),
+                closed: Mutex::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Transport for FakeTransport {
+        async fn send(&mut self, request: JsonRpcRequest) -> Result<()> {
+            self.sent
+                .lock()
+                .unwrap()
+                .push(serde_json::to_string(&request).unwrap());
+            Ok(())
+        }
+
+        async fn receive(&mut self) -> Result<Option<String>> {
+            let mut responses = self.responses.lock().unwrap();
+            if responses.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(responses.remove(0)))
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            *self.closed.lock().unwrap() = true;
+            Ok(())
+        }
+    }
 
     #[test]
     fn test_next_id_increment() {
@@ -140,5 +182,72 @@ mod tests {
         )));
         assert_eq!(client.next_id(), 1);
         assert_eq!(client.next_id(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_initialize() {
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocol_version": "2024-11-05",
+                "capabilities": {},
+                "server_info": { "name": "test", "version": "1.0" }
+            }
+        });
+        let transport = FakeTransport::new(vec![response.to_string()]);
+        let mut client = McpClient::new(Box::new(transport));
+        let result = client.initialize().await.unwrap();
+        assert_eq!(result.server_info.name, "test");
+    }
+
+    #[tokio::test]
+    async fn test_list_tools() {
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": { "tools": [{ "name": "echo", "description": "d", "inputSchema": {} }] }
+        });
+        let transport = FakeTransport::new(vec![response.to_string()]);
+        let mut client = McpClient::new(Box::new(transport));
+        let tools = client.list_tools().await.unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "echo");
+    }
+
+    #[tokio::test]
+    async fn test_call_tool() {
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "result": { "content": [{ "type": "text", "text": "done" }] }
+        });
+        let transport = FakeTransport::new(vec![response.to_string()]);
+        let mut client = McpClient::new(Box::new(transport));
+        let result = client
+            .call_tool("echo", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result.content.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_close() {
+        let transport = FakeTransport::new(vec![]);
+        let mut client = McpClient::new(Box::new(transport));
+        client.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_request_error_response() {
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": { "code": -1, "message": "bad" }
+        });
+        let transport = FakeTransport::new(vec![response.to_string()]);
+        let mut client = McpClient::new(Box::new(transport));
+        let result = client.initialize().await;
+        assert!(result.is_err());
     }
 }

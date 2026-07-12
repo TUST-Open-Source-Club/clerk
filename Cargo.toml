@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "A terminal-based office AI agent built with Rust"
 license = "GPL-3.0"
-repository = "https://github.com/mikesolar/clerk"
+repository = "https://github.com/TUST-Open-Source-Club/clerk"
 
 [dependencies]
 tokio = { version = "1.44", features = ["full"] }

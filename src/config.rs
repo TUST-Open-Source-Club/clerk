@@ -90,6 +90,23 @@ impl Config {
         Ok(config_dir.join("config.toml"))
     }
 
+    pub fn save(&self, path: Option<&Path>) -> Result<()> {
+        let config_path = match path {
+            Some(p) => p.to_path_buf(),
+            None => Self::default_config_path()?,
+        };
+
+        if let Some(parent) = config_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("创建配置目录失败: {}", parent.display()))?;
+        }
+
+        let content = toml::to_string_pretty(self).context("序列化配置失败")?;
+        fs::write(&config_path, content)
+            .with_context(|| format!("写入配置文件失败: {}", config_path.display()))?;
+        Ok(())
+    }
+
     pub fn default_db_path() -> Result<PathBuf> {
         let dirs =
             ProjectDirs::from("com", "mikesolar", "clerk").context("无法确定项目数据目录")?;
@@ -126,4 +143,128 @@ show_sidebar = true
 # working_dir = "/path/to/workspace"
 "#
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_default_config() {
+        let config = Config::default();
+        assert_eq!(config.llm.model, "gpt-4o-mini");
+        assert_eq!(config.llm.base_url, "https://api.openai.com/v1");
+        assert!(config.llm.api_key.is_empty());
+        assert_eq!(config.llm.timeout_seconds, 60);
+        assert!(!config.tui.show_sidebar);
+        assert!(config.storage.db_path.is_none());
+    }
+
+    #[test]
+    fn test_load_from_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+working_dir = "/tmp/wd"
+
+[llm]
+model = "gpt-4o"
+api_key = "sk-test"
+timeout_seconds = 120
+
+[storage]
+db_path = "/tmp/test.db"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(Some(&path)).unwrap();
+        assert_eq!(config.llm.model, "gpt-4o");
+        assert_eq!(config.llm.api_key, "sk-test");
+        assert_eq!(config.llm.timeout_seconds, 120);
+        assert_eq!(config.storage.db_path, Some(PathBuf::from("/tmp/test.db")));
+        assert_eq!(config.working_dir, Some(PathBuf::from("/tmp/wd")));
+    }
+
+    #[test]
+    fn test_load_missing_file_uses_default() {
+        let config = Config::load(Some(Path::new("/nonexistent/path.toml"))).unwrap();
+        assert_eq!(config.llm.model, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn test_load_invalid_toml_fails() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bad.toml");
+        fs::write(&path, "this is not toml").unwrap();
+        assert!(Config::load(Some(&path)).is_err());
+    }
+
+    #[test]
+    fn test_validate_with_empty_api_key() {
+        let config = Config::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_generate_example_config() {
+        let example = generate_example_config();
+        assert!(example.contains("[llm]"));
+        assert!(example.contains("api_key"));
+        assert!(example.contains("[tui]"));
+    }
+
+    #[test]
+    fn test_default_config_path() {
+        let path = Config::default_config_path().unwrap();
+        let s = path.to_string_lossy();
+        assert!(s.contains("clerk"));
+        assert!(s.contains("config.toml"));
+    }
+
+    #[test]
+    fn test_default_db_path() {
+        let path = Config::default_db_path().unwrap();
+        let s = path.to_string_lossy();
+        assert!(s.contains("clerk"));
+        assert!(s.contains("clerk.db"));
+    }
+
+    #[test]
+    fn test_validate_with_api_key() {
+        let mut config = Config::default();
+        config.llm.api_key = "sk-test".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_save_and_load() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("saved.toml");
+        let mut config = Config::default();
+        config.llm.model = "gpt-4o".to_string();
+        config.llm.api_key = "sk-save".to_string();
+        config.llm.timeout_seconds = 90;
+        config.working_dir = Some(PathBuf::from("/tmp/wd"));
+
+        config.save(Some(&path)).unwrap();
+        let loaded = Config::load(Some(&path)).unwrap();
+        assert_eq!(loaded.llm.model, "gpt-4o");
+        assert_eq!(loaded.llm.api_key, "sk-save");
+        assert_eq!(loaded.llm.timeout_seconds, 90);
+        assert_eq!(loaded.working_dir, Some(PathBuf::from("/tmp/wd")));
+    }
+
+    #[test]
+    fn test_save_creates_parent_directory() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nested").join("config.toml");
+        assert!(!path.exists());
+        let config = Config::default();
+        config.save(Some(&path)).unwrap();
+        assert!(path.exists());
+    }
 }
