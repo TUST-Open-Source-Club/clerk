@@ -1,6 +1,6 @@
 use ratatui::{
     buffer::Buffer,
-    layout::{Alignment, Rect},
+    layout::Rect,
     style::{Color, Style},
     text::{Line, Text},
     widgets::{Block, Borders, Paragraph, Widget, Wrap},

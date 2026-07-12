@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
+use sqlx::{Pool, Row, Sqlite, sqlite::SqlitePoolOptions};
 use std::path::Path;
 
 #[derive(Debug, Clone, sqlx::FromRow, PartialEq)]
@@ -108,7 +108,8 @@ impl Store {
         Ok(session)
     }
 
-    pub async fn add_message(&self,
+    pub async fn add_message(
+        &self,
         session_id: &str,
         role: &str,
         content: &str,
@@ -161,13 +162,11 @@ impl Store {
     }
 
     async fn touch_session(&self, id: &str) -> Result<()> {
-        sqlx::query(
-            "UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-        )
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .context("更新会话时间失败")?;
+        sqlx::query("UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .context("更新会话时间失败")?;
         Ok(())
     }
 }
@@ -187,7 +186,10 @@ mod tests {
     #[tokio::test]
     async fn test_create_and_get_session() {
         let (store, _dir) = create_test_store().await;
-        store.create_session("s1", Some("Test Session")).await.unwrap();
+        store
+            .create_session("s1", Some("Test Session"))
+            .await
+            .unwrap();
 
         let session = store.get_session("s1").await.unwrap().unwrap();
         assert_eq!(session.id, "s1");

@@ -1,1 +1,217 @@
-// Agent runner 将在阶段 1 实现
+use anyhow::{Context, Result};
+use serde_json::Value;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tracing::{info, warn};
+
+use crate::agent::llm::{FunctionCall, LlmClient, LlmResponse, Message};
+use crate::agent::session::SessionContext;
+use crate::tools::registry::ToolRegistry;
+
+/// 工具调用事件，用于 TUI 展示
+#[derive(Debug, Clone)]
+pub enum RunnerEvent {
+    ToolCall { name: String, arguments: Value },
+    ToolResult { name: String, result: String },
+    Error(String),
+}
+
+pub struct ReActRunner {
+    client: Arc<dyn LlmClient>,
+    registry: Arc<Mutex<ToolRegistry>>,
+    max_iterations: usize,
+}
+
+impl ReActRunner {
+    pub fn new(client: Arc<dyn LlmClient>, registry: Arc<Mutex<ToolRegistry>>) -> Self {
+        Self {
+            client,
+            registry,
+            max_iterations: 10,
+        }
+    }
+
+    pub fn with_max_iterations(mut self, max: usize) -> Self {
+        self.max_iterations = max;
+        self
+    }
+
+    pub async fn run(
+        &self,
+        ctx: &mut SessionContext,
+        user_input: &str,
+        event_tx: Option<tokio::sync::mpsc::UnboundedSender<RunnerEvent>>,
+    ) -> Result<String> {
+        ctx.add_message(Message::user(user_input));
+
+        for iteration in 0..self.max_iterations {
+            info!("ReAct 迭代 {}", iteration + 1);
+
+            let messages = ctx.build_messages();
+            let tools = {
+                let registry = self.registry.lock().await;
+                registry.tool_definitions()
+            };
+
+            let response = self.client.chat(messages, tools).await?;
+
+            match response {
+                LlmResponse::Text(text) => {
+                    ctx.add_message(Message::assistant(text.clone()));
+                    return Ok(text);
+                }
+                LlmResponse::ToolCalls(tool_calls) => {
+                    let mut assistant_msg = Message::assistant("".to_string());
+                    assistant_msg.tool_calls = Some(tool_calls.clone());
+                    ctx.add_message(assistant_msg);
+
+                    for tool_call in tool_calls {
+                        let result = self
+                            .execute_tool_call(&tool_call, event_tx.as_ref())
+                            .await?;
+                        ctx.add_message(Message::tool(tool_call.id.clone(), result.clone()));
+                    }
+                }
+            }
+        }
+
+        warn!("达到最大迭代次数，返回最后一条消息");
+        Ok("达到最大工具调用次数限制，请简化请求。".to_string())
+    }
+
+    async fn execute_tool_call(
+        &self,
+        tool_call: &crate::agent::llm::ToolCall,
+        event_tx: Option<&tokio::sync::mpsc::UnboundedSender<RunnerEvent>>,
+    ) -> Result<String> {
+        let FunctionCall { name, arguments } = &tool_call.function;
+        let args: Value = serde_json::from_str(arguments)
+            .with_context(|| format!("解析工具参数失败: {}", arguments))?;
+        let args_map = args
+            .as_object()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>();
+
+        if let Some(tx) = event_tx {
+            let _ = tx.send(RunnerEvent::ToolCall {
+                name: name.clone(),
+                arguments: args.clone(),
+            });
+        }
+
+        info!("执行工具: {} 参数: {}", name, args);
+        let registry = self.registry.lock().await;
+        let result = registry.execute(name, args_map).await;
+
+        let result_str = match result {
+            Ok(r) => {
+                let s = r.to_string_for_model();
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(RunnerEvent::ToolResult {
+                        name: name.clone(),
+                        result: s.clone(),
+                    });
+                }
+                s
+            }
+            Err(e) => {
+                let err = format!("工具执行失败: {}", e);
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(RunnerEvent::Error(err.clone()));
+                }
+                err
+            }
+        };
+
+        Ok(result_str)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::llm::{LlmResponse, Message, ToolCall, ToolDefinition};
+    use crate::tools::registry::ToolRegistry;
+    use crate::tools::schema::{Tool, ToolContext, ToolResult, ToolSchema};
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+
+    struct FakeLlm {
+        responses: Mutex<Vec<LlmResponse>>,
+    }
+
+    #[async_trait]
+    impl LlmClient for FakeLlm {
+        async fn chat(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<LlmResponse> {
+            let mut responses = self.responses.lock().await;
+            Ok(responses.remove(0))
+        }
+    }
+
+    struct FakeTool;
+
+    #[async_trait]
+    impl Tool for FakeTool {
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn description(&self) -> &str {
+            "fake"
+        }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new("fake", "fake")
+        }
+        async fn execute(
+            &self,
+            _args: HashMap<String, Value>,
+            _ctx: &ToolContext,
+        ) -> Result<ToolResult> {
+            Ok(ToolResult::Text("done".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_text_response() {
+        let client = Arc::new(FakeLlm {
+            responses: Mutex::new(vec![LlmResponse::Text("hi".to_string())]),
+        });
+        let mut registry = ToolRegistry::new(ToolContext::default());
+        registry.register(Box::new(FakeTool));
+        let runner = ReActRunner::new(client, Arc::new(Mutex::new(registry)));
+        let mut ctx = SessionContext::new("sys");
+
+        let result = runner.run(&mut ctx, "hello", None).await.unwrap();
+        assert_eq!(result, "hi");
+        assert_eq!(ctx.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_run_tool_call() {
+        let client = Arc::new(FakeLlm {
+            responses: Mutex::new(vec![
+                LlmResponse::ToolCalls(vec![ToolCall {
+                    id: "1".to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::agent::llm::FunctionCall {
+                        name: "fake".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                LlmResponse::Text("result".to_string()),
+            ]),
+        });
+        let mut registry = ToolRegistry::new(ToolContext::default());
+        registry.register(Box::new(FakeTool));
+        let runner = ReActRunner::new(client, Arc::new(Mutex::new(registry)));
+        let mut ctx = SessionContext::new("sys");
+
+        let result = runner.run(&mut ctx, "call", None).await.unwrap();
+        assert_eq!(result, "result");
+    }
+}

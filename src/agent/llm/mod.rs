@@ -1,1 +1,7 @@
-// LLM 客户端将在阶段 1 实现
+pub mod client;
+pub mod openai;
+
+pub use client::{
+    FunctionCall, FunctionDefinition, LlmClient, LlmResponse, Message, ToolCall, ToolDefinition,
+};
+pub use openai::OpenAiClient;

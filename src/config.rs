@@ -43,16 +43,10 @@ pub struct TuiConfig {
     pub show_sidebar: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StorageConfig {
     #[serde(default)]
     pub db_path: Option<PathBuf>,
-}
-
-impl Default for StorageConfig {
-    fn default() -> Self {
-        Self { db_path: None }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -88,8 +82,8 @@ impl Config {
     }
 
     pub fn default_config_path() -> Result<PathBuf> {
-        let dirs = ProjectDirs::from("com", "mikesolar", "clerk")
-            .context("无法确定项目配置目录")?;
+        let dirs =
+            ProjectDirs::from("com", "mikesolar", "clerk").context("无法确定项目配置目录")?;
         let config_dir = dirs.config_dir();
         fs::create_dir_all(config_dir)
             .with_context(|| format!("创建配置目录失败: {}", config_dir.display()))?;
@@ -97,8 +91,8 @@ impl Config {
     }
 
     pub fn default_db_path() -> Result<PathBuf> {
-        let dirs = ProjectDirs::from("com", "mikesolar", "clerk")
-            .context("无法确定项目数据目录")?;
+        let dirs =
+            ProjectDirs::from("com", "mikesolar", "clerk").context("无法确定项目数据目录")?;
         let data_dir = dirs.data_dir();
         fs::create_dir_all(data_dir)
             .with_context(|| format!("创建数据目录失败: {}", data_dir.display()))?;
