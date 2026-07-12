@@ -28,7 +28,7 @@ use crate::config::Config;
 use crate::store::Store;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::schema::ToolContext;
-use crate::tools::{fs, shell};
+use crate::tools::{browser, fs, office, pdf, poster, shell, web};
 
 fn setup_logging() -> Result<()> {
     let filter = env::var("RUST_LOG").unwrap_or_else(|_| "clerk=info".to_string());
@@ -47,6 +47,17 @@ fn create_tool_registry(working_dir: &std::path::Path) -> ToolRegistry {
     registry.register(Box::new(fs::WriteFileTool));
     registry.register(Box::new(fs::ListDirTool));
     registry.register(Box::new(shell::ShellTool));
+    registry.register(Box::new(web::WebFetchTool));
+    registry.register(Box::new(web::WebPostTool));
+    registry.register(Box::new(browser::BrowserTool::new()));
+    registry.register(Box::new(office::ReadExcelTool));
+    registry.register(Box::new(office::WriteExcelTool));
+    registry.register(Box::new(office::ReadWordTool));
+    registry.register(Box::new(office::WriteWordTool));
+    registry.register(Box::new(office::RenderOfficeTool));
+    registry.register(Box::new(pdf::MergePdfTool));
+    registry.register(Box::new(pdf::SplitPdfTool));
+    registry.register(Box::new(poster::PosterTool));
     registry
 }
 
@@ -118,6 +129,14 @@ fn build_system_prompt() -> String {
 - fs_write: 写入文件内容
 - fs_list: 列出目录内容
 - shell: 执行 shell 命令
+- web_fetch: 获取网页内容
+- web_post: 发送 POST 请求
+- browser: 使用无头 Chromium 浏览器操作网页、生成 PDF/截图
+- office_read_excel / office_write_excel: Excel 读写
+- office_read_word / office_write_word: Word 读写
+- office_render: 使用 Pandoc 渲染复杂 Word/PDF/PPT（支持模板、公式、图片）
+- pdf_merge / pdf_split: PDF 合并与拆分
+- poster: HTML 转海报 PDF/PNG
 请根据用户需求判断是否需要调用工具，并简洁地回复。"#
         .to_string()
 }

@@ -1,4 +1,9 @@
+pub mod browser;
 pub mod fs;
+pub mod office;
+pub mod pdf;
+pub mod poster;
 pub mod registry;
 pub mod schema;
 pub mod shell;
+pub mod web;

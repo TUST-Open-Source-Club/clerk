@@ -265,6 +265,14 @@ fn build_system_prompt() -> String {
 - fs_write: 写入文件内容
 - fs_list: 列出目录内容
 - shell: 执行 shell 命令
+- web_fetch: 获取网页内容
+- web_post: 发送 POST 请求
+- browser: 使用无头 Chromium 浏览器操作网页、生成 PDF/截图
+- office_read_excel / office_write_excel: Excel 读写
+- office_read_word / office_write_word: Word 读写
+- office_render: 使用 Pandoc 渲染复杂 Word/PDF/PPT（支持模板、公式、图片）
+- pdf_merge / pdf_split: PDF 合并与拆分
+- poster: HTML 转海报 PDF/PNG
 请根据用户需求判断是否需要调用工具，并简洁地回复。"#
         .to_string()
 }
