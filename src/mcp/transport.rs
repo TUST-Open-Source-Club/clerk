@@ -177,6 +177,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_stdio_transport_send_receive() {
         // 使用一个会读取 stdin 再输出固定文本的命令，确保 send 时管道仍然打开。
         let mut transport =
@@ -191,6 +192,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_stdio_transport_receive_eof() {
         let mut transport = StdioTransport::spawn("echo", &["hello".to_string()])
             .await
@@ -199,6 +201,20 @@ mod tests {
         assert_eq!(first, Some("hello".to_string()));
         let second = transport.receive().await.unwrap();
         assert_eq!(second, None);
+        transport.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn test_stdio_transport_receive_on_windows() {
+        let mut transport = StdioTransport::spawn("cmd", &[
+            "/c".to_string(),
+            "echo hello".to_string(),
+        ])
+        .await
+        .unwrap();
+        let first = transport.receive().await.unwrap();
+        assert_eq!(first, Some("hello".to_string()));
         transport.close().await.unwrap();
     }
 
