@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::store::Message;
+use crate::ui::markdown::markdown_to_text;
 
 pub struct ChatPanel {
     messages: Vec<Message>,
@@ -68,27 +69,34 @@ impl ChatPanel {
 
 impl Widget for &ChatPanel {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let lines: Vec<Line> = self
-            .messages
-            .iter()
-            .flat_map(|m| {
-                let role_style = match m.role.as_str() {
-                    "user" => Style::default().fg(Color::Cyan),
-                    "assistant" => Style::default().fg(Color::Green),
-                    "system" => Style::default().fg(Color::Yellow),
-                    "tool" => Style::default().fg(Color::Magenta),
-                    _ => Style::default().fg(Color::Gray),
-                };
-                let header = Line::from(format!("[{}]", m.role)).style(role_style);
-                let content = Line::from(m.content.clone());
-                vec![header, content, Line::from("")]
-            })
-            .collect();
+        let mut all_lines: Vec<Line> = Vec::new();
 
-        let text = Text::from(lines);
+        for m in &self.messages {
+            let role_style = match m.role.as_str() {
+                "user" => Style::default().fg(Color::Cyan),
+                "assistant" => Style::default().fg(Color::Green),
+                "system" => Style::default().fg(Color::Yellow),
+                "tool" => Style::default().fg(Color::Magenta),
+                _ => Style::default().fg(Color::Gray),
+            };
+            let header = Line::from(format!("[{}]", m.role)).style(role_style);
+            all_lines.push(header);
+
+            let content_text = markdown_to_text(&m.content);
+            for mut line in content_text.lines {
+                // 将 markdown 样式与基础文本颜色叠加到每个 span
+                for span in &mut line.spans {
+                    span.style = span.style.patch(Style::default().fg(Color::White));
+                }
+                all_lines.push(line);
+            }
+            all_lines.push(Line::from(""));
+        }
+
+        let text = Text::from(all_lines);
         Paragraph::new(text)
             .block(Block::default().borders(Borders::ALL).title("聊天"))
-            .wrap(Wrap { trim: true })
+            .wrap(Wrap { trim: false })
             .scroll((self.scroll, 0))
             .render(area, buf);
     }
