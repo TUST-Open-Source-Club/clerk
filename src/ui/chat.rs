@@ -34,6 +34,23 @@ impl ChatPanel {
         self.scroll = 0;
     }
 
+    pub fn update_last_message(&mut self, content: impl Into<String>) -> bool {
+        if let Some(last) = self.messages.last_mut() {
+            last.content = content.into();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn pop_last(&mut self) -> Option<Message> {
+        let msg = self.messages.pop();
+        if msg.is_some() {
+            self.scroll = 0;
+        }
+        msg
+    }
+
     pub fn set_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
         self.scroll = 0;

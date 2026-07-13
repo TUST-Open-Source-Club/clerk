@@ -6,15 +6,17 @@ use async_openai::{
         ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
         ChatCompletionRequestToolMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, ChatCompletionTool, ChatCompletionToolType,
-        CreateChatCompletionRequestArgs, FunctionObject,
+        CreateChatCompletionRequestArgs, CreateChatCompletionStreamResponse, FunctionObject,
     },
 };
 use async_trait::async_trait;
 use std::time::Duration;
+use tokio_stream::StreamExt;
 use tracing::debug;
 
 use crate::agent::llm::client::{
-    FunctionCall, LlmClient, LlmResponse, Message, Role as ClerkRole, ToolCall, ToolDefinition,
+    ChatStream, FunctionCall, LlmClient, LlmResponse, Message, Role as ClerkRole, ToolCall,
+    ToolDefinition,
 };
 
 pub struct OpenAiClient {
@@ -198,6 +200,65 @@ impl LlmClient for OpenAiClient {
             .context("LLM 响应为空")?;
 
         Ok(Self::extract_response(choice))
+    }
+
+    async fn chat_stream(
+        &self,
+        messages: Vec<Message>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<ChatStream> {
+        if self.api_key.is_empty() {
+            let text = "LLM API key 未配置，无法调用模型。".to_string();
+            return Ok(Box::new(tokio_stream::iter(vec![Ok(text)])));
+        }
+
+        let messages: Vec<ChatCompletionRequestMessage> =
+            messages.into_iter().map(Self::convert_message).collect();
+        let tools: Vec<ChatCompletionTool> = tools.into_iter().map(Self::convert_tool).collect();
+
+        let mut builder = CreateChatCompletionRequestArgs::default();
+        builder.model(self.model.clone());
+        builder.messages(messages);
+        if !tools.is_empty() {
+            builder.tools(tools);
+        }
+        builder.temperature(self.temperature);
+        builder.stream(true);
+
+        let request = builder.build().context("构建 LLM 流式请求失败")?;
+
+        debug!(
+            "发送 LLM 流式请求: {}",
+            serde_json::to_string_pretty(&request).unwrap_or_default()
+        );
+
+        let stream = tokio::time::timeout(self.timeout, self.client.chat().create_stream(request))
+            .await
+            .context("LLM 流式请求超时")?
+            .with_context(|| {
+                format!(
+                    "请求 LLM 流式失败 (base_url={}, model={})",
+                    self.api_base, self.model
+                )
+            })?;
+
+        let mapped = stream.map(|chunk| -> Result<String> {
+            let chunk: CreateChatCompletionStreamResponse = chunk.context("解析流式响应块失败")?;
+            let mut parts = Vec::new();
+            for choice in chunk.choices {
+                if let Some(calls) = choice.delta.tool_calls
+                    && !calls.is_empty()
+                {
+                    return Err(anyhow::anyhow!("streaming 不支持工具调用"));
+                }
+                if let Some(content) = choice.delta.content {
+                    parts.push(content);
+                }
+            }
+            Ok(parts.join(""))
+        });
+
+        Ok(Box::new(mapped))
     }
 }
 
@@ -392,6 +453,80 @@ mod tests {
             LlmResponse::Text(t) => assert_eq!(t, "hello from mock"),
             _ => panic!("期望 Text 响应"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_chat_stream_with_wiremock() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let chunk1 = serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion.chunk",
+            "created": 1700000000,
+            "model": "gpt-4o-mini",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": { "role": "assistant", "content": "Hello" },
+                    "finish_reason": null
+                }
+            ]
+        });
+        let chunk2 = serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion.chunk",
+            "created": 1700000000,
+            "model": "gpt-4o-mini",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": { "content": " world" },
+                    "finish_reason": null
+                }
+            ]
+        });
+        let chunk3 = serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion.chunk",
+            "created": 1700000000,
+            "model": "gpt-4o-mini",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
+                }
+            ]
+        });
+        let body = format!(
+            "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            chunk1, chunk2, chunk3
+        );
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_bytes(body.into_bytes()),
+            )
+            .mount(&server)
+            .await;
+
+        let client =
+            OpenAiClient::new(server.uri(), "sk-test", "gpt-4o-mini", 30, 0.7_f32).unwrap();
+        let mut stream = client
+            .chat_stream(vec![Message::user("hi")], vec![])
+            .await
+            .unwrap();
+
+        let mut chunks = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            chunks.push(chunk.unwrap());
+        }
+        assert_eq!(chunks.join(""), "Hello world");
     }
 
     #[test]

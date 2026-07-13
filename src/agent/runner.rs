@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
+use tokio_stream::StreamExt;
 use tracing::{info, warn};
 
+use crate::agent::llm::client::Role;
 use crate::agent::llm::{FunctionCall, LlmClient, LlmResponse, Message};
 use crate::agent::session::SessionContext;
 use crate::tools::registry::ToolRegistry;
@@ -16,6 +18,7 @@ pub enum RunnerEvent {
     Error(String),
 }
 
+#[derive(Clone)]
 pub struct ReActRunner {
     client: Arc<dyn LlmClient>,
     registry: Arc<Mutex<ToolRegistry>>,
@@ -77,6 +80,71 @@ impl ReActRunner {
 
         warn!("达到最大迭代次数，返回最后一条消息");
         Ok("达到最大工具调用次数限制，请简化请求。".to_string())
+    }
+
+    /// 流式运行：优先使用 LLM 流式输出。若流式响应中出现工具调用或不支持工具调用，
+    /// 则回退到非流式的 `run()` 方法。
+    pub async fn run_stream(
+        &self,
+        ctx: Arc<Mutex<SessionContext>>,
+        user_input: &str,
+        chunk_tx: mpsc::UnboundedSender<String>,
+        event_tx: Option<mpsc::UnboundedSender<RunnerEvent>>,
+    ) -> Result<String> {
+        {
+            let mut ctx = ctx.lock().await;
+            ctx.add_message(Message::user(user_input));
+        }
+
+        let messages = {
+            let ctx = ctx.lock().await;
+            ctx.build_messages()
+        };
+        let tools = {
+            let registry = self.registry.lock().await;
+            registry.tool_definitions()
+        };
+
+        let mut stream = match self.client.chat_stream(messages, tools).await {
+            Ok(s) => s,
+            Err(e) if e.to_string().contains("不支持工具调用") => {
+                return self.run_fallback(ctx, event_tx).await;
+            }
+            Err(e) => return Err(e),
+        };
+
+        let mut full = String::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            full.push_str(&chunk);
+            let _ = chunk_tx.send(chunk);
+        }
+
+        {
+            let mut ctx = ctx.lock().await;
+            ctx.add_message(Message::assistant(full.clone()));
+        }
+        Ok(full)
+    }
+
+    async fn run_fallback(
+        &self,
+        ctx: Arc<Mutex<SessionContext>>,
+        event_tx: Option<mpsc::UnboundedSender<RunnerEvent>>,
+    ) -> Result<String> {
+        let user_input = {
+            let mut ctx = ctx.lock().await;
+            let last = ctx.messages.pop();
+            debug_assert!(
+                last.as_ref()
+                    .map(|m| matches!(m.role, Role::User))
+                    .unwrap_or(true),
+                "回退时期望最后一条是用户消息"
+            );
+            last.map(|m| m.content).unwrap_or_default()
+        };
+        let mut ctx = ctx.lock().await;
+        self.run(&mut ctx, &user_input, event_tx).await
     }
 
     async fn execute_tool_call(
@@ -152,6 +220,32 @@ mod tests {
         ) -> Result<LlmResponse> {
             let mut responses = self.responses.lock().await;
             Ok(responses.remove(0))
+        }
+    }
+
+    struct ChunkedFakeLlm {
+        chunks: Vec<String>,
+    }
+
+    #[async_trait]
+    impl LlmClient for ChunkedFakeLlm {
+        async fn chat(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<LlmResponse> {
+            Ok(LlmResponse::Text(self.chunks.join("")))
+        }
+
+        async fn chat_stream(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+        ) -> anyhow::Result<
+            Box<dyn tokio_stream::Stream<Item = anyhow::Result<String>> + Send + Unpin>,
+        > {
+            let chunks: Vec<anyhow::Result<String>> = self.chunks.iter().cloned().map(Ok).collect();
+            Ok(Box::new(tokio_stream::iter(chunks)))
         }
     }
 
@@ -311,6 +405,131 @@ mod tests {
         }
         assert!(saw_tool_call, "should receive ToolCall event");
         assert!(saw_tool_result, "should receive ToolResult event");
+    }
+
+    #[tokio::test]
+    async fn test_run_stream_text() {
+        let client = Arc::new(ChunkedFakeLlm {
+            chunks: vec!["Hello".to_string(), ", ".to_string(), "world!".to_string()],
+        });
+        let registry = ToolRegistry::new(ToolContext::default());
+        let runner = ReActRunner::new(client, Arc::new(Mutex::new(registry)));
+        let ctx = Arc::new(Mutex::new(SessionContext::new("sys")));
+        let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        let result = runner
+            .run_stream(ctx.clone(), "hi", chunk_tx, None)
+            .await
+            .unwrap();
+
+        assert_eq!(result, "Hello, world!");
+        let ctx = ctx.lock().await;
+        assert_eq!(ctx.messages.len(), 2);
+        assert_eq!(ctx.messages[0].role, Role::User);
+        assert_eq!(ctx.messages[0].content, "hi");
+        assert_eq!(ctx.messages[1].role, Role::Assistant);
+        assert_eq!(ctx.messages[1].content, "Hello, world!");
+
+        let mut chunks = Vec::new();
+        while let Ok(chunk) = chunk_rx.try_recv() {
+            chunks.push(chunk);
+        }
+        assert_eq!(chunks, vec!["Hello", ", ", "world!"]);
+    }
+
+    #[tokio::test]
+    async fn test_run_stream_fallback_to_run_on_tool_call() {
+        struct ToolCallStreamFakeLlm;
+
+        #[async_trait]
+        impl LlmClient for ToolCallStreamFakeLlm {
+            async fn chat(
+                &self,
+                _messages: Vec<Message>,
+                _tools: Vec<ToolDefinition>,
+            ) -> Result<LlmResponse> {
+                Ok(LlmResponse::ToolCalls(vec![ToolCall {
+                    id: "1".to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::agent::llm::FunctionCall {
+                        name: "fake".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]))
+            }
+
+            async fn chat_stream(
+                &self,
+                _messages: Vec<Message>,
+                _tools: Vec<ToolDefinition>,
+            ) -> anyhow::Result<
+                Box<dyn tokio_stream::Stream<Item = anyhow::Result<String>> + Send + Unpin>,
+            > {
+                Err(anyhow::anyhow!("streaming 不支持工具调用"))
+            }
+        }
+
+        let client = Arc::new(ToolCallStreamFakeLlm);
+        let mut registry = ToolRegistry::new(ToolContext::default());
+        registry.register(Arc::new(FakeTool));
+        let runner = ReActRunner::new(client, Arc::new(Mutex::new(registry)));
+        let ctx = Arc::new(Mutex::new(SessionContext::new("sys")));
+        let (chunk_tx, _chunk_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        let result = runner
+            .run_stream(ctx.clone(), "call", chunk_tx, None)
+            .await
+            .unwrap();
+
+        assert_eq!(result, "达到最大工具调用次数限制，请简化请求。");
+        let ctx = ctx.lock().await;
+        assert!(ctx.messages.iter().any(|m| m.role == Role::Tool));
+    }
+
+    #[tokio::test]
+    async fn test_run_stream_error_from_chat_stream_falls_back() {
+        struct ToolCallStreamFakeLlm;
+
+        #[async_trait]
+        impl LlmClient for ToolCallStreamFakeLlm {
+            async fn chat(
+                &self,
+                _messages: Vec<Message>,
+                _tools: Vec<ToolDefinition>,
+            ) -> Result<LlmResponse> {
+                Ok(LlmResponse::ToolCalls(vec![ToolCall {
+                    id: "1".to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::agent::llm::FunctionCall {
+                        name: "fake".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]))
+            }
+
+            async fn chat_stream(
+                &self,
+                _messages: Vec<Message>,
+                _tools: Vec<ToolDefinition>,
+            ) -> anyhow::Result<
+                Box<dyn tokio_stream::Stream<Item = anyhow::Result<String>> + Send + Unpin>,
+            > {
+                Err(anyhow::anyhow!("streaming 不支持工具调用"))
+            }
+        }
+
+        let client = Arc::new(ToolCallStreamFakeLlm);
+        let mut registry = ToolRegistry::new(ToolContext::default());
+        registry.register(Arc::new(FakeTool));
+        let runner = ReActRunner::new(client, Arc::new(Mutex::new(registry)));
+        let ctx = Arc::new(Mutex::new(SessionContext::new("sys")));
+        let (chunk_tx, _chunk_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        let result = runner
+            .run_stream(ctx.clone(), "call", chunk_tx, None)
+            .await
+            .unwrap();
+        assert_eq!(result, "达到最大工具调用次数限制，请简化请求。");
     }
 
     #[test]

@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 流式输出类型别名
+pub type ChatStream = Box<dyn tokio_stream::Stream<Item = anyhow::Result<String>> + Send + Unpin>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
@@ -148,6 +151,19 @@ pub trait LlmClient: Send + Sync {
         messages: Vec<Message>,
         tools: Vec<ToolDefinition>,
     ) -> anyhow::Result<LlmResponse>;
+
+    /// 流式聊天。默认实现退化为 `chat()`，一次性返回完整文本，
+    /// 因此 mock/测试客户端无需额外实现。
+    async fn chat_stream(
+        &self,
+        messages: Vec<Message>,
+        tools: Vec<ToolDefinition>,
+    ) -> anyhow::Result<ChatStream> {
+        match self.chat(messages, tools).await? {
+            LlmResponse::Text(text) => Ok(Box::new(tokio_stream::iter(vec![Ok(text)]))),
+            LlmResponse::ToolCalls(_) => Err(anyhow::anyhow!("streaming 不支持工具调用")),
+        }
+    }
 }
 
 /// 从 FunctionCall 参数解析 JSON

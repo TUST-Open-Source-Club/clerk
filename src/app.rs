@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame, Terminal,
     backend::Backend,
@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
+use tokio_stream::StreamExt;
 use tracing::info;
 use uuid::Uuid;
 
@@ -31,7 +32,7 @@ use crate::ui::input::InputArea;
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppStatus {
     Idle,
-    Thinking,
+    Streaming,
     Error(String),
 }
 
@@ -45,10 +46,21 @@ pub struct App {
     pub yolo_mode: bool,
     pub multimodal: MultimodalConfig,
     pub attachments: Vec<PathBuf>,
+    pub streaming_reply: String,
     store: Store,
     runner: ReActRunner,
-    session_ctx: SessionContext,
+    session_ctx: Arc<Mutex<SessionContext>>,
     working_dir: PathBuf,
+    stream_rx: Option<mpsc::UnboundedReceiver<StreamEvent>>,
+    streaming_message_added: bool,
+    spinner_frame: usize,
+}
+
+#[derive(Debug)]
+enum StreamEvent {
+    Chunk(String),
+    ToolEvent(RunnerEvent),
+    Done(Result<String>),
 }
 
 impl App {
@@ -64,7 +76,7 @@ impl App {
         let working_dir = registry.lock().await.context().working_dir.clone();
 
         info!("创建新会话: {}", session_id);
-        let session_ctx = SessionContext::new(build_system_prompt());
+        let session_ctx = Arc::new(Mutex::new(SessionContext::new(build_system_prompt())));
         let runner = ReActRunner::new(client, registry);
 
         Ok(Self {
@@ -77,10 +89,14 @@ impl App {
             yolo_mode: false,
             multimodal,
             attachments: Vec::new(),
+            streaming_reply: String::new(),
             store,
             runner,
             session_ctx,
             working_dir,
+            stream_rx: None,
+            streaming_message_added: false,
+            spinner_frame: 0,
         })
     }
 
@@ -98,7 +114,7 @@ impl App {
         let working_dir = registry.lock().await.context().working_dir.clone();
 
         info!("加载会话: {}", session_id);
-        let session_ctx = SessionContext::new(build_system_prompt());
+        let session_ctx = Arc::new(Mutex::new(SessionContext::new(build_system_prompt())));
         let runner = ReActRunner::new(client, registry);
 
         Ok(Self {
@@ -111,20 +127,46 @@ impl App {
             yolo_mode: false,
             multimodal,
             attachments: Vec::new(),
+            streaming_reply: String::new(),
             store,
             runner,
             session_ctx,
             working_dir,
+            stream_rx: None,
+            streaming_message_added: false,
+            spinner_frame: 0,
         })
     }
 
     pub async fn run<B: Backend>(mut self, terminal: &mut Terminal<B>) -> Result<()> {
+        let mut reader = EventStream::new();
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
+
         while !self.should_quit {
             terminal.draw(|f| self.draw(f))?;
-            if event::poll(Duration::from_millis(100))?
-                && let Event::Key(key) = event::read()?
-            {
-                self.handle_key(key).await?;
+
+            tokio::select! {
+                maybe_event = reader.next() => {
+                    if let Some(Ok(Event::Key(key))) = maybe_event {
+                        self.handle_key(key).await?;
+                    }
+                }
+                maybe_event = async {
+                    if let Some(rx) = self.stream_rx.as_mut() {
+                        rx.recv().await
+                    } else {
+                        std::future::pending::<Option<StreamEvent>>().await
+                    }
+                } => {
+                    if let Some(event) = maybe_event {
+                        self.handle_stream_event(event).await?;
+                    }
+                }
+                _ = tick.tick() => {
+                    if self.status == AppStatus::Streaming {
+                        self.spinner_frame = self.spinner_frame.wrapping_add(1);
+                    }
+                }
             }
         }
         Ok(())
@@ -394,47 +436,122 @@ impl App {
             .await?;
         self.chat.push_message(user_msg);
 
-        self.status = AppStatus::Thinking;
+        self.status = AppStatus::Streaming;
         self.tool_events.clear();
+        self.streaming_reply.clear();
+        self.streaming_message_added = false;
+        self.spinner_frame = 0;
 
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<RunnerEvent>();
+        let (stream_tx, stream_rx) = mpsc::unbounded_channel::<StreamEvent>();
+        self.stream_rx = Some(stream_rx);
 
-        // 在后台运行 LLM，同时接收工具调用事件
-        let result = {
-            let runner = &self.runner;
-            let session_ctx = &mut self.session_ctx;
-            runner.run(&mut *session_ctx, &text, Some(event_tx)).await
-        };
+        let ctx = self.session_ctx.clone();
+        let runner = self.runner.clone();
+        let text_clone = text.clone();
+        tokio::spawn(async move {
+            let (event_tx, mut event_rx) = mpsc::unbounded_channel::<RunnerEvent>();
+            let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<String>();
 
-        // 处理已接收的事件
-        while let Ok(event) = event_rx.try_recv() {
-            self.tool_events.push(event.clone());
-            if let RunnerEvent::ToolCall { name, .. } = &event {
-                let tool_msg = self
-                    .store
-                    .add_message(&self.session_id, "tool", &format!("调用工具: {}", name))
-                    .await?;
-                self.chat.push_message(tool_msg);
+            let stream_handle = tokio::spawn(async move {
+                runner
+                    .run_stream(ctx, &text_clone, chunk_tx, Some(event_tx))
+                    .await
+            });
+
+            loop {
+                tokio::select! {
+                    Some(chunk) = chunk_rx.recv() => {
+                        let _ = stream_tx.send(StreamEvent::Chunk(chunk));
+                    }
+                    Some(event) = event_rx.recv() => {
+                        let _ = stream_tx.send(StreamEvent::ToolEvent(event));
+                    }
+                    else => break,
+                }
             }
-        }
 
-        let reply = match result {
-            Ok(text) => text,
-            Err(e) => {
-                let err = format!("处理失败: {:#}", e);
-                self.status = AppStatus::Error(err.clone());
-                err
-            }
-        };
-
-        let assistant_msg = self
-            .store
-            .add_message(&self.session_id, "assistant", &reply)
-            .await?;
-        self.chat.push_message(assistant_msg);
-        self.status = AppStatus::Idle;
+            let result = stream_handle
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!(e)));
+            let _ = stream_tx.send(StreamEvent::Done(result));
+        });
 
         Ok(())
+    }
+
+    async fn handle_stream_event(&mut self, event: StreamEvent) -> Result<()> {
+        match event {
+            StreamEvent::Chunk(chunk) => {
+                self.streaming_reply.push_str(&chunk);
+                if !self.streaming_message_added {
+                    self.chat.push_message(Message {
+                        id: 0,
+                        session_id: self.session_id.clone(),
+                        role: "assistant".to_string(),
+                        content: self.streaming_reply.clone(),
+                        created_at: Utc::now(),
+                    });
+                    self.streaming_message_added = true;
+                } else {
+                    self.chat.update_last_message(&self.streaming_reply);
+                }
+            }
+            StreamEvent::ToolEvent(event) => {
+                self.tool_events.push(event.clone());
+                if let RunnerEvent::ToolCall { name, .. } = &event {
+                    let tool_msg = self
+                        .store
+                        .add_message(&self.session_id, "tool", &format!("调用工具: {}", name))
+                        .await?;
+                    self.chat.push_message(tool_msg);
+                }
+            }
+            StreamEvent::Done(result) => {
+                if self.streaming_message_added {
+                    self.chat.pop_last();
+                }
+
+                let reply = match result {
+                    Ok(text) => text,
+                    Err(e) => {
+                        let err = format!("处理失败: {:#}", e);
+                        self.status = AppStatus::Error(err.clone());
+                        err
+                    }
+                };
+
+                let assistant_msg = self
+                    .store
+                    .add_message(&self.session_id, "assistant", &reply)
+                    .await?;
+                self.chat.push_message(assistant_msg);
+                self.streaming_reply.clear();
+                self.streaming_message_added = false;
+                self.stream_rx = None;
+                if self.status == AppStatus::Streaming {
+                    self.status = AppStatus::Idle;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    async fn drain_stream(&mut self) {
+        if let Some(mut rx) = self.stream_rx.take() {
+            let mut done = false;
+            while !done {
+                match rx.recv().await {
+                    Some(event) => {
+                        done = matches!(event, StreamEvent::Done(_));
+                        if self.handle_stream_event(event).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
     }
 
     fn draw(&self, frame: &mut Frame) {
@@ -466,13 +583,20 @@ impl App {
                     format!("最近工具调用: {} 次", self.tool_events.len())
                 }
             }
-            AppStatus::Thinking => "思考中...".to_string(),
+            AppStatus::Streaming => {
+                format!("{} 思考中...", spinner_char(self.spinner_frame))
+            }
             AppStatus::Error(e) => format!("错误: {}", e),
         };
         let status =
             Paragraph::new(Line::from(status_text)).style(Style::default().fg(Color::Gray));
         frame.render_widget(status, chunks[2]);
     }
+}
+
+fn spinner_char(frame: usize) -> char {
+    const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    FRAMES[frame % FRAMES.len()]
 }
 
 fn media_kind(path: &Path) -> Option<&'static str> {
@@ -570,6 +694,32 @@ mod tests {
         }
     }
 
+    struct StreamingFakeLlm {
+        chunks: Vec<String>,
+    }
+
+    #[async_trait]
+    impl LlmClient for StreamingFakeLlm {
+        async fn chat(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<LlmResponse> {
+            Ok(LlmResponse::Text(self.chunks.join("")))
+        }
+
+        async fn chat_stream(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+        ) -> anyhow::Result<
+            Box<dyn tokio_stream::Stream<Item = anyhow::Result<String>> + Send + Unpin>,
+        > {
+            let chunks: Vec<anyhow::Result<String>> = self.chunks.iter().cloned().map(Ok).collect();
+            Ok(Box::new(tokio_stream::iter(chunks)))
+        }
+    }
+
     struct FakeTool;
 
     #[async_trait]
@@ -643,6 +793,7 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Enter))
             .await
             .unwrap();
+        app.drain_stream().await;
     }
 
     #[tokio::test]
@@ -704,6 +855,7 @@ mod tests {
         app.input.insert_char('h');
         app.input.insert_char('i');
         app.send_message().await.unwrap();
+        app.drain_stream().await;
 
         let messages = app.store.list_messages(&app.session_id).await.unwrap();
         assert!(
@@ -839,6 +991,80 @@ mod tests {
         assert!(prompt.contains("write_skill"));
         assert!(prompt.contains("read_media_file"));
         assert!(prompt.contains("render_to_image"));
+    }
+
+    #[test]
+    fn test_spinner_char_cycles() {
+        let first = spinner_char(0);
+        assert_eq!(first, '⠋');
+        assert_eq!(spinner_char(9), '⠏');
+        assert_eq!(spinner_char(10), '⠋');
+    }
+
+    #[tokio::test]
+    async fn test_streaming_reply_accumulates() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("app.db");
+        let store = Store::open(&path).await.unwrap();
+        let client: Arc<dyn LlmClient> = Arc::new(StreamingFakeLlm {
+            chunks: vec!["He".to_string(), "llo".to_string()],
+        });
+        let registry = ToolRegistry::new(ToolContext {
+            working_dir: dir.path().to_path_buf(),
+        });
+        let mut app = App::new(
+            store,
+            client,
+            Arc::new(Mutex::new(registry)),
+            MultimodalConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        app.input.insert_char('h');
+        app.input.insert_char('i');
+        app.send_message().await.unwrap();
+        app.drain_stream().await;
+
+        assert_eq!(app.streaming_reply, "");
+        assert_eq!(app.status, AppStatus::Idle);
+        let messages = app.store.list_messages(&app.session_id).await.unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.role == "assistant" && m.content == "Hello")
+        );
+        let last_chat = app.chat.messages().last().unwrap();
+        assert_eq!(last_chat.role, "assistant");
+        assert_eq!(last_chat.content, "Hello");
+    }
+
+    #[tokio::test]
+    async fn test_send_message_streaming_status() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("app.db");
+        let store = Store::open(&path).await.unwrap();
+        let client: Arc<dyn LlmClient> = Arc::new(StreamingFakeLlm {
+            chunks: vec!["ok".to_string()],
+        });
+        let registry = ToolRegistry::new(ToolContext {
+            working_dir: dir.path().to_path_buf(),
+        });
+        let mut app = App::new(
+            store,
+            client,
+            Arc::new(Mutex::new(registry)),
+            MultimodalConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        app.input.insert_str("hello");
+        app.send_message().await.unwrap();
+        assert_eq!(app.status, AppStatus::Streaming);
+
+        app.drain_stream().await;
+        assert_eq!(app.status, AppStatus::Idle);
     }
 
     #[tokio::test]
