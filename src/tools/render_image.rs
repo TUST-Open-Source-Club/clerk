@@ -495,6 +495,24 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_command_exists_false_for_missing() {
+        assert!(!command_exists("clerk_nonexistent_binary_9999").await);
+    }
+
+    #[test]
+    fn test_pdf_tool_missing_hint() {
+        let hint = pdf_tool_missing_hint();
+        assert!(hint.contains("pdftoppm"));
+        assert!(hint.contains("mutool"));
+    }
+
+    #[test]
+    fn test_office_tool_missing_hint() {
+        let hint = office_tool_missing_hint();
+        assert!(hint.contains("LibreOffice"));
+    }
+
     fn create_minimal_pdf(path: &std::path::Path) {
         use lopdf::{Document, Object, Stream, dictionary};
         let mut doc = Document::with_version("1.4");

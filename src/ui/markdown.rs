@@ -1,4 +1,4 @@
-use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
@@ -11,7 +11,12 @@ pub fn markdown_to_text(input: &str) -> Text<'_> {
     let mut current_spans: Vec<Span> = Vec::new();
     let mut style = Style::default();
 
-    for event in Parser::new(input) {
+    let options = Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TABLES
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_TASKLISTS;
+
+    for event in Parser::new_ext(input, options) {
         match event {
             Event::Start(tag) => {
                 style = apply_tag_style(style, &tag);
@@ -149,5 +154,107 @@ mod tests {
         let text = markdown_to_text("`code`");
         let line = text.lines.first().unwrap();
         assert!(line.spans.iter().any(|s| s.content == "code"));
+    }
+
+    #[test]
+    fn test_markdown_italic() {
+        let text = markdown_to_text("*italic*");
+        let span = text.lines[0].spans[0].clone();
+        assert_eq!(span.content, "italic");
+        assert!(span.style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn test_markdown_strikethrough() {
+        let text = markdown_to_text("~~removed~~");
+        let span = text.lines[0].spans[0].clone();
+        assert_eq!(span.content, "removed");
+        assert!(span.style.add_modifier.contains(Modifier::CROSSED_OUT));
+    }
+
+    #[test]
+    fn test_markdown_heading() {
+        let text = markdown_to_text("# title");
+        let span = text.lines[0].spans[0].clone();
+        assert_eq!(span.content, "title");
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_markdown_link() {
+        let text = markdown_to_text("[link](https://example.com)");
+        let span = text.lines[0].spans[0].clone();
+        assert_eq!(span.content, "link");
+        assert!(span.style.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(span.style.fg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn test_markdown_codeblock() {
+        let text = markdown_to_text("```rust\nlet x = 1;\n```");
+        let content: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(content.contains("let x = 1;"));
+    }
+
+    #[test]
+    fn test_markdown_blockquote() {
+        let text = markdown_to_text("> quote");
+        assert!(
+            text.lines
+                .iter()
+                .any(|l| l.spans.iter().any(|s| s.content.contains("quote")))
+        );
+    }
+
+    #[test]
+    fn test_markdown_list() {
+        let text = markdown_to_text("- one\n- two");
+        let content: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(content.contains("one"));
+        assert!(content.contains("two"));
+    }
+
+    #[test]
+    fn test_markdown_horizontal_rule() {
+        let text = markdown_to_text("---");
+        assert!(text.lines.iter().any(|l| {
+            l.spans
+                .first()
+                .map(|s| s.content.starts_with('─'))
+                .unwrap_or(false)
+        }));
+    }
+
+    #[test]
+    fn test_markdown_line_break() {
+        let text = markdown_to_text("line1  \nline2");
+        assert!(text.lines.len() >= 2);
+        let first: String = text.lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(first.contains("line1"));
+    }
+
+    #[test]
+    fn test_markdown_empty_input_uses_fallback() {
+        let text = markdown_to_text("");
+        assert_eq!(text.lines.len(), 1);
+        assert!(text.lines[0].spans.is_empty());
+    }
+
+    #[test]
+    fn test_markdown_paragraphs_keep_empty_line() {
+        let text = markdown_to_text("p1\n\np2");
+        assert!(text.lines.iter().any(|l| l.spans.is_empty()));
     }
 }

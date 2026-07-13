@@ -423,6 +423,27 @@ mod tests {
         assert!(config.multimodal.supports_video);
     }
 
+    #[test]
+    fn test_read_line_trims_newline() {
+        let mut input = Cursor::new("hello\r\n");
+        assert_eq!(read_line(&mut input).unwrap(), "hello");
+
+        let mut input2 = Cursor::new("world\n");
+        assert_eq!(read_line(&mut input2).unwrap(), "world");
+    }
+
+    #[test]
+    fn test_parse_yes_no() {
+        assert!(parse_yes_no("y"));
+        assert!(parse_yes_no("Y"));
+        assert!(parse_yes_no("yes"));
+        assert!(parse_yes_no("是"));
+        assert!(parse_yes_no("  Y  "));
+        assert!(!parse_yes_no("n"));
+        assert!(!parse_yes_no(""));
+        assert!(!parse_yes_no("no"));
+    }
+
     struct FakeLlm;
 
     #[async_trait::async_trait]
