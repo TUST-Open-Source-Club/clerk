@@ -2,4 +2,5 @@
 .idea/
 clippy_errors.txt
 config.toml
-~
+~*.preview.png
+clerk_poster.html
