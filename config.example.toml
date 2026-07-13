@@ -6,6 +6,9 @@ model = "gpt-4o-mini"
 base_url = "https://api.openai.com/v1"
 api_key = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 timeout_seconds = 60
+temperature = 0.7
+
+# 某些模型（如 Moonshot kimi-k2.6）只支持 temperature = 1，可在此处覆盖。
 
 [tui]
 theme = "default"
@@ -13,5 +16,9 @@ show_sidebar = true
 
 [storage]
 # db_path = "/path/to/clerk.db"
+
+[multimodal]
+# supports_images = true
+# supports_video = true
 
 # working_dir = "/path/to/workspace"
