@@ -17,6 +17,10 @@ fn default_temperature() -> f32 {
     0.7_f32
 }
 
+fn default_timeout_seconds() -> u64 {
+    600
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
     #[serde(default = "default_model")]
@@ -24,7 +28,7 @@ pub struct LlmConfig {
     #[serde(default = "default_base_url")]
     pub base_url: String,
     pub api_key: String,
-    #[serde(default)]
+    #[serde(default = "default_timeout_seconds")]
     pub timeout_seconds: u64,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
@@ -36,7 +40,7 @@ impl Default for LlmConfig {
             model: default_model(),
             base_url: default_base_url(),
             api_key: String::new(),
-            timeout_seconds: 60,
+            timeout_seconds: default_timeout_seconds(),
             temperature: default_temperature(),
         }
     }
@@ -180,7 +184,7 @@ mod tests {
         assert_eq!(config.llm.model, "gpt-4o-mini");
         assert_eq!(config.llm.base_url, "https://api.openai.com/v1");
         assert!(config.llm.api_key.is_empty());
-        assert_eq!(config.llm.timeout_seconds, 60);
+        assert_eq!(config.llm.timeout_seconds, 600);
         assert!((config.llm.temperature - 0.7_f32).abs() < f32::EPSILON);
         assert!(!config.tui.show_sidebar);
         assert!(config.storage.db_path.is_none());

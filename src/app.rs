@@ -197,7 +197,7 @@ impl App {
             }
             KeyCode::Char(c) => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
-                    self.should_quit = true;
+                    // Ctrl+C 被屏蔽，用户需使用 /exit 退出
                 } else {
                     self.input.insert_char(c);
                 }
@@ -898,12 +898,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_key_quit_with_ctrl_c() {
+    async fn test_handle_key_ctrl_c_is_ignored() {
         let (mut app, _dir) = create_test_app().await;
         assert!(!app.should_quit);
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         app.handle_key(key).await.unwrap();
-        assert!(app.should_quit);
+        assert!(!app.should_quit, "Ctrl+C 不应退出，用户应使用 /exit");
     }
 
     #[tokio::test]

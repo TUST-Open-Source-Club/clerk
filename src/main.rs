@@ -142,11 +142,11 @@ fn run_config_wizard<R: BufRead, W: Write>(
     writer.flush()?;
     let api_key = read_line(reader)?;
 
-    writer.write_all("请输入超时时间（秒）[60]: ".as_bytes())?;
+    writer.write_all("请输入超时时间（秒）[600]: ".as_bytes())?;
     writer.flush()?;
     let timeout_line = read_line(reader)?;
     let timeout_seconds = if timeout_line.is_empty() {
-        60
+        600
     } else {
         timeout_line.parse().context("超时时间必须是有效的数字")?
     };
@@ -394,7 +394,7 @@ mod tests {
         assert_eq!(config.llm.base_url, "https://api.openai.com/v1");
         assert_eq!(config.llm.model, "gpt-4o-mini");
         assert!(config.llm.api_key.is_empty());
-        assert_eq!(config.llm.timeout_seconds, 60);
+        assert_eq!(config.llm.timeout_seconds, 600);
         assert!((config.llm.temperature - 0.7_f32).abs() < f32::EPSILON);
         assert_eq!(config.working_dir, Some(env::current_dir().unwrap()));
         assert!(!config.multimodal.supports_images);
