@@ -9,6 +9,7 @@ use ratatui::{
     text::Line,
     widgets::Paragraph,
 };
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,6 +53,7 @@ pub struct App {
     session_ctx: Arc<Mutex<SessionContext>>,
     working_dir: PathBuf,
     stream_rx: Option<mpsc::UnboundedReceiver<StreamEvent>>,
+    stream_abort: Option<tokio::task::AbortHandle>,
     streaming_message_added: bool,
     spinner_frame: usize,
 }
@@ -95,6 +97,7 @@ impl App {
             session_ctx,
             working_dir,
             stream_rx: None,
+            stream_abort: None,
             streaming_message_added: false,
             spinner_frame: 0,
         })
@@ -133,6 +136,7 @@ impl App {
             session_ctx,
             working_dir,
             stream_rx: None,
+            stream_abort: None,
             streaming_message_added: false,
             spinner_frame: 0,
         })
@@ -196,8 +200,13 @@ impl App {
                 self.input.autocomplete();
             }
             KeyCode::Char(c) => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
-                    // Ctrl+C 被屏蔽，用户需使用 /exit 退出
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && c == 'c'
+                    && self.status == AppStatus::Streaming
+                {
+                    if let Some(abort) = self.stream_abort.take() {
+                        abort.abort();
+                    }
                 } else {
                     self.input.insert_char(c);
                 }
@@ -441,6 +450,7 @@ impl App {
         self.streaming_reply.clear();
         self.streaming_message_added = false;
         self.spinner_frame = 0;
+        self.stream_abort = None;
 
         let (stream_tx, stream_rx) = mpsc::unbounded_channel::<StreamEvent>();
         self.stream_rx = Some(stream_rx);
@@ -448,16 +458,18 @@ impl App {
         let ctx = self.session_ctx.clone();
         let runner = self.runner.clone();
         let text_clone = text.clone();
+
+        // 先创建实际的 LLM runner task，以便把 AbortHandle 交给主循环
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<RunnerEvent>();
+        let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<String>();
+        let stream_handle = tokio::spawn(async move {
+            runner
+                .run_stream(ctx, &text_clone, chunk_tx, Some(event_tx))
+                .await
+        });
+        self.stream_abort = Some(stream_handle.abort_handle());
+
         tokio::spawn(async move {
-            let (event_tx, mut event_rx) = mpsc::unbounded_channel::<RunnerEvent>();
-            let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<String>();
-
-            let stream_handle = tokio::spawn(async move {
-                runner
-                    .run_stream(ctx, &text_clone, chunk_tx, Some(event_tx))
-                    .await
-            });
-
             loop {
                 tokio::select! {
                     Some(chunk) = chunk_rx.recv() => {
@@ -470,9 +482,13 @@ impl App {
                 }
             }
 
-            let result = stream_handle
-                .await
-                .unwrap_or_else(|e| Err(anyhow::anyhow!(e)));
+            let result = stream_handle.await.unwrap_or_else(|e| {
+                if e.is_cancelled() {
+                    Err(anyhow::anyhow!("生成已取消"))
+                } else {
+                    Err(anyhow::anyhow!(e))
+                }
+            });
             let _ = stream_tx.send(StreamEvent::Done(result));
         });
 
@@ -498,15 +514,15 @@ impl App {
             }
             StreamEvent::ToolEvent(event) => {
                 self.tool_events.push(event.clone());
-                if let RunnerEvent::ToolCall { name, .. } = &event {
-                    let tool_msg = self
-                        .store
-                        .add_message(&self.session_id, "tool", &format!("调用工具: {}", name))
-                        .await?;
-                    self.chat.push_message(tool_msg);
-                }
+                let content = format_tool_event(&event);
+                let tool_msg = self
+                    .store
+                    .add_message(&self.session_id, "tool", &content)
+                    .await?;
+                self.chat.push_message(tool_msg);
             }
             StreamEvent::Done(result) => {
+                self.stream_abort = None;
                 if self.streaming_message_added {
                     self.chat.pop_last();
                 }
@@ -514,9 +530,15 @@ impl App {
                 let reply = match result {
                     Ok(text) => text,
                     Err(e) => {
-                        let err = format!("处理失败: {:#}", e);
-                        self.status = AppStatus::Error(err.clone());
-                        err
+                        let msg = e.to_string();
+                        if msg.contains("生成已取消") || msg.contains("cancelled") {
+                            self.status = AppStatus::Idle;
+                            "生成已取消".to_string()
+                        } else {
+                            let err = format!("处理失败: {:#}", e);
+                            self.status = AppStatus::Error(err.clone());
+                            err
+                        }
                     }
                 };
 
@@ -597,6 +619,62 @@ impl App {
 fn spinner_char(frame: usize) -> char {
     const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     FRAMES[frame % FRAMES.len()]
+}
+
+fn format_tool_event(event: &RunnerEvent) -> String {
+    match event {
+        RunnerEvent::ToolCall { name, arguments } => {
+            let args = format_tool_arguments(name, arguments);
+            format!("调用工具 {}: {}", name, args)
+        }
+        RunnerEvent::ToolResult { name, result } => {
+            let summary = result.chars().take(200).collect::<String>();
+            let ellipsis = if result.chars().count() > 200 {
+                " ..."
+            } else {
+                ""
+            };
+            format!("工具 {} 结果: {}{}", name, summary, ellipsis)
+        }
+        RunnerEvent::Error(e) => format!("工具错误: {}", e),
+    }
+}
+
+fn format_tool_arguments(name: &str, arguments: &Value) -> String {
+    match arguments.as_object() {
+        Some(map) => {
+            let parts: Vec<String> = map
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, format_arg_value(name, k, v)))
+                .collect();
+            if parts.is_empty() {
+                "(无参数)".to_string()
+            } else {
+                parts.join(", ")
+            }
+        }
+        None => arguments.to_string(),
+    }
+}
+
+fn format_arg_value(tool_name: &str, key: &str, value: &serde_json::Value) -> String {
+    // shell 命令、文件内容等长字段需要截断
+    let is_long_field = matches!(
+        (tool_name, key),
+        ("shell", "command")
+            | ("fs_write", "content")
+            | ("web_fetch", "url")
+            | ("web_post", "url")
+            | ("browser", "url")
+            | ("poster", "input")
+    );
+
+    let s = value.to_string();
+    if is_long_field && s.len() > 120 {
+        format!("{}...（共 {} 字符）", &s[..120], s.len())
+    } else {
+        s
+    }
 }
 
 fn media_kind(path: &Path) -> Option<&'static str> {
@@ -717,6 +795,36 @@ mod tests {
         > {
             let chunks: Vec<anyhow::Result<String>> = self.chunks.iter().cloned().map(Ok).collect();
             Ok(Box::new(tokio_stream::iter(chunks)))
+        }
+    }
+
+    struct SlowStreamingFakeLlm;
+
+    #[async_trait]
+    impl LlmClient for SlowStreamingFakeLlm {
+        async fn chat(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<LlmResponse> {
+            Ok(LlmResponse::Text("slow reply".to_string()))
+        }
+
+        async fn chat_stream(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+        ) -> anyhow::Result<
+            Box<dyn tokio_stream::Stream<Item = anyhow::Result<String>> + Send + Unpin>,
+        > {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<anyhow::Result<String>>();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let _ = tx.send(Ok("hello".to_string()));
+            });
+            Ok(Box::new(
+                tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
+            ))
         }
     }
 
@@ -898,12 +1006,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_key_ctrl_c_is_ignored() {
+    async fn test_handle_key_ctrl_c_when_idle_does_nothing() {
         let (mut app, _dir) = create_test_app().await;
         assert!(!app.should_quit);
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         app.handle_key(key).await.unwrap();
-        assert!(!app.should_quit, "Ctrl+C 不应退出，用户应使用 /exit");
+        assert!(!app.should_quit, "空闲时 Ctrl+C 不应退出");
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_ctrl_c_aborts_streaming() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("app.db");
+        let store = Store::open(&path).await.unwrap();
+        let client: Arc<dyn LlmClient> = Arc::new(SlowStreamingFakeLlm);
+        let registry = ToolRegistry::new(ToolContext {
+            working_dir: dir.path().to_path_buf(),
+        });
+        let mut app = App::new(
+            store,
+            client,
+            Arc::new(Mutex::new(registry)),
+            MultimodalConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        app.input.insert_char('h');
+        app.input.insert_char('i');
+        app.send_message().await.unwrap();
+        assert_eq!(app.status, AppStatus::Streaming);
+        assert!(app.stream_abort.is_some());
+
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        app.handle_key(key).await.unwrap();
+
+        app.drain_stream().await;
+        assert_eq!(app.status, AppStatus::Idle);
+        let messages = app.store.list_messages(&app.session_id).await.unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.role == "assistant" && m.content == "生成已取消")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_format_tool_event_shows_details() {
+        let event = RunnerEvent::ToolCall {
+            name: "fs_write".to_string(),
+            arguments: serde_json::json!({
+                "path": "/tmp/foo.html",
+                "content": "hello world"
+            }),
+        };
+        let text = format_tool_event(&event);
+        assert!(text.contains("fs_write"));
+        assert!(text.contains("/tmp/foo.html"));
+
+        let event = RunnerEvent::ToolCall {
+            name: "shell".to_string(),
+            arguments: serde_json::json!({"command": "ls -la"}),
+        };
+        let text = format_tool_event(&event);
+        assert!(text.contains("shell"));
+        assert!(text.contains("ls -la"));
     }
 
     #[tokio::test]
