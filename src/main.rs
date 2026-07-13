@@ -138,6 +138,17 @@ fn run_config_wizard<R: BufRead, W: Write>(
         timeout_line.parse().context("超时时间必须是有效的数字")?
     };
 
+    writer.write_all("请输入 temperature [0.7]: ".as_bytes())?;
+    writer.flush()?;
+    let temperature_line = read_line(reader)?;
+    let temperature: f32 = if temperature_line.is_empty() {
+        0.7_f32
+    } else {
+        temperature_line
+            .parse()
+            .context("temperature 必须是有效的数字")?
+    };
+
     writer.write_all("请输入工作目录 [当前目录]: ".as_bytes())?;
     writer.flush()?;
     let working_dir_line = read_line(reader)?;
@@ -160,6 +171,7 @@ fn run_config_wizard<R: BufRead, W: Write>(
     config.llm.model = model;
     config.llm.api_key = api_key;
     config.llm.timeout_seconds = timeout_seconds;
+    config.llm.temperature = temperature;
     config.working_dir = Some(working_dir);
     config.multimodal.supports_images = supports_images;
     config.multimodal.supports_video = supports_video;
@@ -362,7 +374,7 @@ mod tests {
     fn test_run_config_wizard_with_defaults() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("wizard.toml");
-        let answers = "\n\n\n\n\n\n\n";
+        let answers = "\n\n\n\n\n\n\n\n";
         let mut output: Vec<u8> = Vec::new();
         let config = run_config_wizard(&path, &mut Cursor::new(answers), &mut output).unwrap();
 
@@ -370,6 +382,7 @@ mod tests {
         assert_eq!(config.llm.model, "gpt-4o-mini");
         assert!(config.llm.api_key.is_empty());
         assert_eq!(config.llm.timeout_seconds, 60);
+        assert!((config.llm.temperature - 0.7_f32).abs() < f32::EPSILON);
         assert_eq!(config.working_dir, Some(env::current_dir().unwrap()));
         assert!(!config.multimodal.supports_images);
         assert!(!config.multimodal.supports_video);
@@ -380,7 +393,7 @@ mod tests {
     fn test_run_config_wizard_with_custom_values() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("wizard.toml");
-        let answers = "https://api.example.com/v1\ngpt-4o\nsk-123\n30\n/tmp/wd\ny\ny\n";
+        let answers = "https://api.example.com/v1\ngpt-4o\nsk-123\n30\n1.0\n/tmp/wd\ny\ny\n";
         let mut output: Vec<u8> = Vec::new();
         let config = run_config_wizard(&path, &mut Cursor::new(answers), &mut output).unwrap();
 
@@ -388,6 +401,7 @@ mod tests {
         assert_eq!(config.llm.model, "gpt-4o");
         assert_eq!(config.llm.api_key, "sk-123");
         assert_eq!(config.llm.timeout_seconds, 30);
+        assert!((config.llm.temperature - 1.0_f32).abs() < f32::EPSILON);
         assert_eq!(
             config.working_dir,
             Some(std::path::PathBuf::from("/tmp/wd"))

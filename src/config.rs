@@ -13,6 +13,10 @@ fn default_base_url() -> String {
     "https://api.openai.com/v1".to_string()
 }
 
+fn default_temperature() -> f32 {
+    0.7_f32
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
     #[serde(default = "default_model")]
@@ -22,6 +26,8 @@ pub struct LlmConfig {
     pub api_key: String,
     #[serde(default)]
     pub timeout_seconds: u64,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
 }
 
 impl Default for LlmConfig {
@@ -31,6 +37,7 @@ impl Default for LlmConfig {
             base_url: default_base_url(),
             api_key: String::new(),
             timeout_seconds: 60,
+            temperature: default_temperature(),
         }
     }
 }
@@ -142,6 +149,9 @@ model = "gpt-4o-mini"
 base_url = "https://api.openai.com/v1"
 api_key = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 timeout_seconds = 60
+temperature = 0.7
+
+# 某些模型（如 Moonshot kimi-k2.6）只支持 temperature = 1，可在此处覆盖。
 
 [tui]
 theme = "default"
@@ -171,6 +181,7 @@ mod tests {
         assert_eq!(config.llm.base_url, "https://api.openai.com/v1");
         assert!(config.llm.api_key.is_empty());
         assert_eq!(config.llm.timeout_seconds, 60);
+        assert!((config.llm.temperature - 0.7_f32).abs() < f32::EPSILON);
         assert!(!config.tui.show_sidebar);
         assert!(config.storage.db_path.is_none());
     }
@@ -188,6 +199,7 @@ working_dir = "/tmp/wd"
 model = "gpt-4o"
 api_key = "sk-test"
 timeout_seconds = 120
+temperature = 1.0
 
 [storage]
 db_path = "/tmp/test.db"
@@ -199,6 +211,7 @@ db_path = "/tmp/test.db"
         assert_eq!(config.llm.model, "gpt-4o");
         assert_eq!(config.llm.api_key, "sk-test");
         assert_eq!(config.llm.timeout_seconds, 120);
+        assert!((config.llm.temperature - 1.0_f32).abs() < f32::EPSILON);
         assert_eq!(config.storage.db_path, Some(PathBuf::from("/tmp/test.db")));
         assert_eq!(config.working_dir, Some(PathBuf::from("/tmp/wd")));
     }
@@ -263,6 +276,7 @@ db_path = "/tmp/test.db"
         config.llm.model = "gpt-4o".to_string();
         config.llm.api_key = "sk-save".to_string();
         config.llm.timeout_seconds = 90;
+        config.llm.temperature = 1.0_f32;
         config.working_dir = Some(PathBuf::from("/tmp/wd"));
         config.multimodal.supports_images = true;
         config.multimodal.supports_video = true;
@@ -272,6 +286,7 @@ db_path = "/tmp/test.db"
         assert_eq!(loaded.llm.model, "gpt-4o");
         assert_eq!(loaded.llm.api_key, "sk-save");
         assert_eq!(loaded.llm.timeout_seconds, 90);
+        assert!((loaded.llm.temperature - 1.0_f32).abs() < f32::EPSILON);
         assert_eq!(loaded.working_dir, Some(PathBuf::from("/tmp/wd")));
         assert!(loaded.multimodal.supports_images);
         assert!(loaded.multimodal.supports_video);

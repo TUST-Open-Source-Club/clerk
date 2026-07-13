@@ -23,6 +23,7 @@ pub struct OpenAiClient {
     api_base: String,
     model: String,
     timeout: Duration,
+    temperature: f32,
 }
 
 impl OpenAiClient {
@@ -31,6 +32,7 @@ impl OpenAiClient {
         api_key: impl Into<String>,
         model: impl Into<String>,
         timeout_seconds: u64,
+        temperature: f32,
     ) -> Result<Self> {
         let api_key = api_key.into();
         let base_url = base_url.into();
@@ -44,6 +46,7 @@ impl OpenAiClient {
             api_base: base_url,
             model: model.into(),
             timeout: Duration::from_secs(timeout_seconds.max(5)),
+            temperature,
         })
     }
 
@@ -53,6 +56,7 @@ impl OpenAiClient {
             config.api_key.clone(),
             config.model.clone(),
             config.timeout_seconds,
+            config.temperature,
         )
     }
 
@@ -168,7 +172,7 @@ impl LlmClient for OpenAiClient {
         if !tools.is_empty() {
             builder.tools(tools);
         }
-        builder.temperature(0.7_f32);
+        builder.temperature(self.temperature);
 
         let request = builder.build().context("构建 LLM 请求失败")?;
 
@@ -203,13 +207,14 @@ mod tests {
 
     #[test]
     fn test_empty_api_key_returns_notice() {
-        let client = OpenAiClient::new("http://localhost", "", "gpt-4o-mini", 30).unwrap();
+        let client = OpenAiClient::new("http://localhost", "", "gpt-4o-mini", 30, 0.7_f32).unwrap();
         assert!(client.api_key.is_empty());
     }
 
     #[tokio::test]
     async fn test_convert_and_extract() {
-        let _client = OpenAiClient::new("http://localhost", "sk-test", "gpt-4o-mini", 30).unwrap();
+        let _client =
+            OpenAiClient::new("http://localhost", "sk-test", "gpt-4o-mini", 30, 0.7_f32).unwrap();
 
         let msg = Message::user("hello");
         let converted = OpenAiClient::convert_message(msg);
@@ -329,7 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_chat_with_empty_key() {
-        let client = OpenAiClient::new("http://localhost", "", "gpt-4o-mini", 30).unwrap();
+        let client = OpenAiClient::new("http://localhost", "", "gpt-4o-mini", 30, 0.7_f32).unwrap();
         let result = client.chat(vec![], vec![]).await.unwrap();
         match result {
             LlmResponse::Text(t) => assert!(t.contains("API key 未配置")),
@@ -375,7 +380,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAiClient::new(server.uri(), "sk-test", "gpt-4o-mini", 30).unwrap();
+        let client =
+            OpenAiClient::new(server.uri(), "sk-test", "gpt-4o-mini", 30, 0.7_f32).unwrap();
 
         let result = client
             .chat(vec![Message::user("hi")], vec![])
@@ -390,7 +396,7 @@ mod tests {
 
     #[test]
     fn test_timeout_minimum() {
-        let client = OpenAiClient::new("http://localhost", "sk", "m", 1).unwrap();
+        let client = OpenAiClient::new("http://localhost", "sk", "m", 1, 0.7_f32).unwrap();
         assert_eq!(client.timeout, Duration::from_secs(5));
     }
 }
