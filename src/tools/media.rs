@@ -6,6 +6,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use crate::tools::schema::{Tool, ToolContext, ToolResult, ToolSchema, get_string};
+use crate::util::expand_tilde;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use uuid::Uuid;
 
@@ -67,7 +68,7 @@ pub async fn read_media_file(path: &Path) -> Result<String> {
 }
 
 fn resolve_path(working_dir: &Path, input: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(input);
+    let path = expand_tilde(input);
     Ok(if path.is_absolute() {
         path
     } else {

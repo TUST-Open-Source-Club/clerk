@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use tokio_stream::StreamExt;
 
 use crate::tools::schema::{Tool, ToolContext, ToolResult, ToolSchema, get_i64, get_string};
+use crate::util::expand_tilde;
 
 pub struct RenderToImage;
 
@@ -82,7 +83,7 @@ impl Tool for RenderToImage {
 }
 
 fn resolve_path(working_dir: &Path, input: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(input);
+    let path = expand_tilde(input);
     Ok(if path.is_absolute() {
         path
     } else {

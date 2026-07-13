@@ -6,7 +6,7 @@ use tokio_stream::StreamExt;
 use tracing::{info, warn};
 
 use crate::agent::llm::client::Role;
-use crate::agent::llm::{FunctionCall, LlmClient, LlmResponse, Message};
+use crate::agent::llm::{FunctionCall, LlmClient, LlmResponse, Message, StreamChunk};
 use crate::agent::session::SessionContext;
 use crate::tools::registry::ToolRegistry;
 
@@ -88,7 +88,7 @@ impl ReActRunner {
         &self,
         ctx: Arc<Mutex<SessionContext>>,
         user_input: &str,
-        chunk_tx: mpsc::UnboundedSender<String>,
+        chunk_tx: mpsc::UnboundedSender<StreamChunk>,
         event_tx: Option<mpsc::UnboundedSender<RunnerEvent>>,
     ) -> Result<String> {
         {
@@ -117,7 +117,9 @@ impl ReActRunner {
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(chunk) => {
-                    full.push_str(&chunk);
+                    if let Some(text) = &chunk.content {
+                        full.push_str(text);
+                    }
                     let _ = chunk_tx.send(chunk);
                 }
                 Err(e) if e.to_string().contains("不支持工具调用") => {
@@ -249,9 +251,19 @@ mod tests {
             _messages: Vec<Message>,
             _tools: Vec<ToolDefinition>,
         ) -> anyhow::Result<
-            Box<dyn tokio_stream::Stream<Item = anyhow::Result<String>> + Send + Unpin>,
+            Box<dyn tokio_stream::Stream<Item = anyhow::Result<StreamChunk>> + Send + Unpin>,
         > {
-            let chunks: Vec<anyhow::Result<String>> = self.chunks.iter().cloned().map(Ok).collect();
+            let chunks: Vec<anyhow::Result<StreamChunk>> = self
+                .chunks
+                .iter()
+                .cloned()
+                .map(|s| {
+                    Ok(StreamChunk {
+                        content: Some(s),
+                        reasoning_content: None,
+                    })
+                })
+                .collect();
             Ok(Box::new(tokio_stream::iter(chunks)))
         }
     }
@@ -422,7 +434,7 @@ mod tests {
         let registry = ToolRegistry::new(ToolContext::default());
         let runner = ReActRunner::new(client, Arc::new(Mutex::new(registry)));
         let ctx = Arc::new(Mutex::new(SessionContext::new("sys")));
-        let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<StreamChunk>();
 
         let result = runner
             .run_stream(ctx.clone(), "hi", chunk_tx, None)
@@ -441,7 +453,8 @@ mod tests {
         while let Ok(chunk) = chunk_rx.try_recv() {
             chunks.push(chunk);
         }
-        assert_eq!(chunks, vec!["Hello", ", ", "world!"]);
+        let contents: Vec<String> = chunks.into_iter().filter_map(|c| c.content).collect();
+        assert_eq!(contents, vec!["Hello", ", ", "world!"]);
     }
 
     #[tokio::test]
@@ -470,7 +483,7 @@ mod tests {
                 _messages: Vec<Message>,
                 _tools: Vec<ToolDefinition>,
             ) -> anyhow::Result<
-                Box<dyn tokio_stream::Stream<Item = anyhow::Result<String>> + Send + Unpin>,
+                Box<dyn tokio_stream::Stream<Item = anyhow::Result<StreamChunk>> + Send + Unpin>,
             > {
                 Err(anyhow::anyhow!("streaming 不支持工具调用"))
             }
@@ -481,7 +494,7 @@ mod tests {
         registry.register(Arc::new(FakeTool));
         let runner = ReActRunner::new(client, Arc::new(Mutex::new(registry)));
         let ctx = Arc::new(Mutex::new(SessionContext::new("sys")));
-        let (chunk_tx, _chunk_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (chunk_tx, _chunk_rx) = tokio::sync::mpsc::unbounded_channel::<StreamChunk>();
 
         let result = runner
             .run_stream(ctx.clone(), "call", chunk_tx, None)
@@ -519,7 +532,7 @@ mod tests {
                 _messages: Vec<Message>,
                 _tools: Vec<ToolDefinition>,
             ) -> anyhow::Result<
-                Box<dyn tokio_stream::Stream<Item = anyhow::Result<String>> + Send + Unpin>,
+                Box<dyn tokio_stream::Stream<Item = anyhow::Result<StreamChunk>> + Send + Unpin>,
             > {
                 Err(anyhow::anyhow!("streaming 不支持工具调用"))
             }
@@ -530,7 +543,7 @@ mod tests {
         registry.register(Arc::new(FakeTool));
         let runner = ReActRunner::new(client, Arc::new(Mutex::new(registry)));
         let ctx = Arc::new(Mutex::new(SessionContext::new("sys")));
-        let (chunk_tx, _chunk_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (chunk_tx, _chunk_rx) = tokio::sync::mpsc::unbounded_channel::<StreamChunk>();
 
         let result = runner
             .run_stream(ctx.clone(), "call", chunk_tx, None)
@@ -565,7 +578,7 @@ mod tests {
                 _messages: Vec<Message>,
                 _tools: Vec<ToolDefinition>,
             ) -> anyhow::Result<
-                Box<dyn tokio_stream::Stream<Item = anyhow::Result<String>> + Send + Unpin>,
+                Box<dyn tokio_stream::Stream<Item = anyhow::Result<StreamChunk>> + Send + Unpin>,
             > {
                 Ok(Box::new(tokio_stream::iter(vec![Err(anyhow::anyhow!(
                     "streaming 不支持工具调用"
@@ -578,7 +591,7 @@ mod tests {
         registry.register(Arc::new(FakeTool));
         let runner = ReActRunner::new(client, Arc::new(Mutex::new(registry)));
         let ctx = Arc::new(Mutex::new(SessionContext::new("sys")));
-        let (chunk_tx, _chunk_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (chunk_tx, _chunk_rx) = tokio::sync::mpsc::unbounded_channel::<StreamChunk>();
 
         let result = runner
             .run_stream(ctx.clone(), "call", chunk_tx, None)

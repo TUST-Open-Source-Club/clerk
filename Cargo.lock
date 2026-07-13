@@ -812,6 +812,7 @@ dependencies = [
  "crossterm",
  "directories",
  "docx-rs",
+ "futures-util",
  "image",
  "infer",
  "lopdf",

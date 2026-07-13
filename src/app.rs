@@ -19,7 +19,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::agent::{
-    llm::LlmClient,
+    llm::{LlmClient, StreamChunk},
     runner::{ReActRunner, RunnerEvent},
     session::SessionContext,
 };
@@ -60,7 +60,7 @@ pub struct App {
 
 #[derive(Debug)]
 enum StreamEvent {
-    Chunk(String),
+    Chunk(StreamChunk),
     ToolEvent(RunnerEvent),
     Done(Result<String>),
 }
@@ -461,7 +461,7 @@ impl App {
 
         // 先创建实际的 LLM runner task，以便把 AbortHandle 交给主循环
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<RunnerEvent>();
-        let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<String>();
+        let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<StreamChunk>();
         let stream_handle = tokio::spawn(async move {
             runner
                 .run_stream(ctx, &text_clone, chunk_tx, Some(event_tx))
@@ -498,7 +498,14 @@ impl App {
     async fn handle_stream_event(&mut self, event: StreamEvent) -> Result<()> {
         match event {
             StreamEvent::Chunk(chunk) => {
-                self.streaming_reply.push_str(&chunk);
+                if let Some(reasoning) = chunk.reasoning_content {
+                    self.streaming_reply.push_str("<think>");
+                    self.streaming_reply.push_str(&reasoning);
+                    self.streaming_reply.push_str("</think>");
+                }
+                if let Some(content) = chunk.content {
+                    self.streaming_reply.push_str(&content);
+                }
                 if !self.streaming_message_added {
                     self.chat.push_message(Message {
                         id: 0,
@@ -791,9 +798,19 @@ mod tests {
             _messages: Vec<Message>,
             _tools: Vec<ToolDefinition>,
         ) -> anyhow::Result<
-            Box<dyn tokio_stream::Stream<Item = anyhow::Result<String>> + Send + Unpin>,
+            Box<dyn tokio_stream::Stream<Item = anyhow::Result<StreamChunk>> + Send + Unpin>,
         > {
-            let chunks: Vec<anyhow::Result<String>> = self.chunks.iter().cloned().map(Ok).collect();
+            let chunks: Vec<anyhow::Result<StreamChunk>> = self
+                .chunks
+                .iter()
+                .cloned()
+                .map(|s| {
+                    Ok(StreamChunk {
+                        content: Some(s),
+                        reasoning_content: None,
+                    })
+                })
+                .collect();
             Ok(Box::new(tokio_stream::iter(chunks)))
         }
     }
@@ -815,12 +832,15 @@ mod tests {
             _messages: Vec<Message>,
             _tools: Vec<ToolDefinition>,
         ) -> anyhow::Result<
-            Box<dyn tokio_stream::Stream<Item = anyhow::Result<String>> + Send + Unpin>,
+            Box<dyn tokio_stream::Stream<Item = anyhow::Result<StreamChunk>> + Send + Unpin>,
         > {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<anyhow::Result<String>>();
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<anyhow::Result<StreamChunk>>();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(60)).await;
-                let _ = tx.send(Ok("hello".to_string()));
+                let _ = tx.send(Ok(StreamChunk {
+                    content: Some("hello".to_string()),
+                    reasoning_content: None,
+                }));
             });
             Ok(Box::new(
                 tokio_stream::wrappers::UnboundedReceiverStream::new(rx),

@@ -39,6 +39,7 @@ use crate::tools::subagent::{
 };
 use crate::tools::write_skill::WriteSkillTool;
 use crate::tools::{browser, fs, office, pdf, poster, shell, web};
+use crate::util::expand_tilde;
 
 fn setup_logging() -> Result<()> {
     let filter = env::var("RUST_LOG").unwrap_or_else(|_| "clerk=info".to_string());
@@ -168,7 +169,7 @@ fn run_config_wizard<R: BufRead, W: Write>(
     let working_dir = if working_dir_line.is_empty() {
         env::current_dir().context("无法获取当前目录")?
     } else {
-        std::path::PathBuf::from(working_dir_line)
+        expand_tilde(working_dir_line)
     };
 
     writer.write_all("模型是否支持图片输入 (y/N): ".as_bytes())?;
@@ -221,7 +222,8 @@ async fn run_app() -> Result<()> {
 
     let working_dir = args
         .working_dir
-        .or(config.working_dir.clone())
+        .map(expand_tilde)
+        .or_else(|| config.working_dir.clone().map(expand_tilde))
         .unwrap_or_else(|| env::current_dir().unwrap());
     env::set_current_dir(&working_dir)
         .with_context(|| format!("无法切换到工作目录: {}", working_dir.display()))?;

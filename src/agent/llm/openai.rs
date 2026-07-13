@@ -6,17 +6,17 @@ use async_openai::{
         ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
         ChatCompletionRequestToolMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, ChatCompletionTool, ChatCompletionToolType,
-        CreateChatCompletionRequestArgs, CreateChatCompletionStreamResponse, FunctionObject,
+        CreateChatCompletionRequestArgs, FunctionObject,
     },
 };
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use std::time::Duration;
-use tokio_stream::StreamExt;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::agent::llm::client::{
-    ChatStream, FunctionCall, LlmClient, LlmResponse, Message, Role as ClerkRole, ToolCall,
-    ToolDefinition,
+    ChatStream, FunctionCall, LlmClient, LlmResponse, Message, Role as ClerkRole, StreamChunk,
+    ToolCall, ToolDefinition,
 };
 
 pub struct OpenAiClient {
@@ -209,56 +209,172 @@ impl LlmClient for OpenAiClient {
     ) -> Result<ChatStream> {
         if self.api_key.is_empty() {
             let text = "LLM API key 未配置，无法调用模型。".to_string();
-            return Ok(Box::new(tokio_stream::iter(vec![Ok(text)])));
+            return Ok(Box::new(tokio_stream::iter(vec![Ok(StreamChunk {
+                content: Some(text),
+                reasoning_content: None,
+            })])));
         }
 
         let messages: Vec<ChatCompletionRequestMessage> =
             messages.into_iter().map(Self::convert_message).collect();
         let tools: Vec<ChatCompletionTool> = tools.into_iter().map(Self::convert_tool).collect();
 
-        let mut builder = CreateChatCompletionRequestArgs::default();
-        builder.model(self.model.clone());
-        builder.messages(messages);
-        if !tools.is_empty() {
-            builder.tools(tools);
-        }
-        builder.temperature(self.temperature);
-        builder.stream(true);
-
-        let request = builder.build().context("构建 LLM 流式请求失败")?;
-
-        debug!(
-            "发送 LLM 流式请求: {}",
-            serde_json::to_string_pretty(&request).unwrap_or_default()
-        );
-
-        let stream = tokio::time::timeout(self.timeout, self.client.chat().create_stream(request))
-            .await
-            .context("LLM 流式请求超时")?
-            .with_context(|| {
-                format!(
-                    "请求 LLM 流式失败 (base_url={}, model={})",
-                    self.api_base, self.model
-                )
-            })?;
-
-        let mapped = stream.map(|chunk| -> Result<String> {
-            let chunk: CreateChatCompletionStreamResponse = chunk.context("解析流式响应块失败")?;
-            let mut parts = Vec::new();
-            for choice in chunk.choices {
-                if let Some(calls) = choice.delta.tool_calls
-                    && !calls.is_empty()
-                {
-                    return Err(anyhow::anyhow!("streaming 不支持工具调用"));
-                }
-                if let Some(content) = choice.delta.content {
-                    parts.push(content);
-                }
+        let request_body = serde_json::json!({
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "temperature": self.temperature,
+            "stream": true,
+            "stream_options": {
+                "include_usage": true
             }
-            Ok(parts.join(""))
         });
 
-        Ok(Box::new(mapped))
+        info!(
+            "LLM 流式请求超时: {} 秒，目标: {}",
+            self.timeout.as_secs(),
+            self.api_base
+        );
+        debug!(
+            "发送 LLM 流式请求: {}",
+            serde_json::to_string_pretty(&request_body).unwrap_or_default()
+        );
+
+        let http_client = reqwest::Client::builder()
+            .timeout(self.timeout)
+            .build()
+            .context("构建 HTTP 客户端失败")?;
+
+        let url = if self.api_base.ends_with('/') {
+            format!("{}chat/completions", self.api_base)
+        } else {
+            format!("{}/chat/completions", self.api_base)
+        };
+
+        let response = tokio::time::timeout(
+            self.timeout,
+            http_client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&request_body)
+                .send(),
+        )
+        .await
+        .context("LLM 流式请求超时")?
+        .with_context(|| {
+            format!(
+                "请求 LLM 流式失败 (base_url={}, model={})",
+                self.api_base, self.model
+            )
+        })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "无法读取错误响应".to_string());
+            anyhow::bail!("请求 LLM 流式失败 (status={}): {}", status, body);
+        }
+
+        let byte_stream = response.bytes_stream();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<anyhow::Result<StreamChunk>>();
+
+        tokio::spawn(async move {
+            let mut content_buffer = String::new();
+            let mut reasoning_buffer = String::new();
+            let mut line_buffer = String::new();
+            let mut byte_stream = std::pin::pin!(byte_stream);
+
+            while let Some(chunk) = byte_stream.next().await {
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx.send(Err(anyhow::anyhow!(e)));
+                        break;
+                    }
+                };
+                let text = String::from_utf8_lossy(&chunk);
+                line_buffer.push_str(&text);
+
+                while let Some((line, rest)) = line_buffer.split_once('\n') {
+                    let line = line.trim().to_string();
+                    line_buffer = rest.to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if !line.starts_with("data: ") {
+                        continue;
+                    }
+                    let data = &line["data: ".len()..];
+                    if data == "[DONE]" {
+                        break;
+                    }
+
+                    let json: serde_json::Value = match serde_json::from_str(data) {
+                        Ok(j) => j,
+                        Err(e) => {
+                            let _ = tx.send(Err(anyhow::anyhow!("解析 SSE 数据失败: {}", e)));
+                            break;
+                        }
+                    };
+                    let choices = json
+                        .get("choices")
+                        .and_then(|c| c.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+
+                    for choice in choices {
+                        let delta = choice.get("delta").cloned().unwrap_or_default();
+
+                        if let Some(calls) = delta.get("tool_calls").and_then(|c| c.as_array())
+                            && !calls.is_empty()
+                        {
+                            if !content_buffer.is_empty() || !reasoning_buffer.is_empty() {
+                                let _ = tx.send(Ok(StreamChunk {
+                                    content: Some(std::mem::take(&mut content_buffer))
+                                        .filter(|s| !s.is_empty()),
+                                    reasoning_content: Some(std::mem::take(&mut reasoning_buffer))
+                                        .filter(|s| !s.is_empty()),
+                                }));
+                            }
+                            let _ = tx.send(Err(anyhow::anyhow!("streaming 不支持工具调用")));
+                            return;
+                        }
+
+                        if let Some(reasoning) =
+                            delta.get("reasoning_content").and_then(|r| r.as_str())
+                        {
+                            reasoning_buffer.push_str(reasoning);
+                        }
+                        if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                            content_buffer.push_str(content);
+                        }
+
+                        if !content_buffer.is_empty() && !reasoning_buffer.is_empty() {
+                            let _ = tx.send(Ok(StreamChunk {
+                                content: None,
+                                reasoning_content: Some(std::mem::take(&mut reasoning_buffer)),
+                            }));
+                        }
+                    }
+
+                    if !content_buffer.is_empty() || !reasoning_buffer.is_empty() {
+                        let _ = tx.send(Ok(StreamChunk {
+                            content: Some(std::mem::take(&mut content_buffer))
+                                .filter(|s| !s.is_empty()),
+                            reasoning_content: Some(std::mem::take(&mut reasoning_buffer))
+                                .filter(|s| !s.is_empty()),
+                        }));
+                    }
+                }
+            }
+        });
+
+        Ok(Box::new(
+            tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
+        ))
     }
 }
 
@@ -526,7 +642,8 @@ mod tests {
         while let Some(chunk) = stream.next().await {
             chunks.push(chunk.unwrap());
         }
-        assert_eq!(chunks.join(""), "Hello world");
+        let text: String = chunks.into_iter().filter_map(|c| c.content).collect();
+        assert_eq!(text, "Hello world");
     }
 
     #[test]

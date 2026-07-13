@@ -5,8 +5,55 @@ use ratatui::{
 };
 
 /// 将 Markdown 文本转换为带样式的 ratatui `Text`。
+/// 支持 `<think>...</think>` 标签，标签内文本以灰色显示，用于展示模型思考过程。
 /// 如果解析失败或内容为空，则退回到纯文本显示。
 pub fn markdown_to_text(input: &str) -> Text<'_> {
+    let mut all_lines: Vec<Line> = Vec::new();
+    let mut rest = input;
+
+    loop {
+        match rest.split_once("<think>") {
+            Some((before, after)) => {
+                if !before.is_empty() {
+                    all_lines.extend(render_markdown(before).lines);
+                }
+                let (thinking, remaining) = after.split_once("</think>").unwrap_or((after, ""));
+                if !thinking.is_empty() {
+                    for line in thinking.lines() {
+                        all_lines.push(Line::from(Span::styled(
+                            line.to_string(),
+                            Style::default().fg(Color::Gray),
+                        )));
+                    }
+                }
+                rest = remaining;
+            }
+            None => {
+                if !rest.is_empty() {
+                    all_lines.extend(render_markdown(rest).lines);
+                }
+                break;
+            }
+        }
+    }
+
+    // 去掉末尾由块级元素结束产生的空行
+    while let Some(last) = all_lines.last() {
+        if last.spans.is_empty() || (last.spans.len() == 1 && last.spans[0].content.is_empty()) {
+            all_lines.pop();
+        } else {
+            break;
+        }
+    }
+
+    if all_lines.is_empty() {
+        all_lines.push(Line::from(input.to_string()));
+    }
+
+    Text::from(all_lines)
+}
+
+fn render_markdown(input: &str) -> Text<'_> {
     let mut lines: Vec<Line> = Vec::new();
     let mut current_spans: Vec<Span> = Vec::new();
     let mut style = Style::default();
@@ -55,19 +102,6 @@ pub fn markdown_to_text(input: &str) -> Text<'_> {
 
     if !current_spans.is_empty() {
         lines.push(Line::from(current_spans));
-    }
-
-    // 去掉末尾由块级元素结束产生的空行，保留段落/列表之间的真实空行。
-    while let Some(last) = lines.last() {
-        if last.spans.is_empty() || (last.spans.len() == 1 && last.spans[0].content.is_empty()) {
-            lines.pop();
-        } else {
-            break;
-        }
-    }
-
-    if lines.is_empty() {
-        lines.push(Line::from(input.to_string()));
     }
 
     Text::from(lines)
@@ -256,5 +290,18 @@ mod tests {
     fn test_markdown_paragraphs_keep_empty_line() {
         let text = markdown_to_text("p1\n\np2");
         assert!(text.lines.iter().any(|l| l.spans.is_empty()));
+    }
+
+    #[test]
+    fn test_markdown_think_block_renders_gray() {
+        let text = markdown_to_text("before<think>thinking...</think>after");
+        let content: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(content.contains("thinking..."));
+        assert!(content.contains("before"));
+        assert!(content.contains("after"));
     }
 }

@@ -1,8 +1,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// 流式输出块，可能同时包含模型思考内容和正式回复内容。
+#[derive(Debug, Clone, Default)]
+pub struct StreamChunk {
+    pub content: Option<String>,
+    pub reasoning_content: Option<String>,
+}
+
 /// 流式输出类型别名
-pub type ChatStream = Box<dyn tokio_stream::Stream<Item = anyhow::Result<String>> + Send + Unpin>;
+pub type ChatStream =
+    Box<dyn tokio_stream::Stream<Item = anyhow::Result<StreamChunk>> + Send + Unpin>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -160,7 +168,10 @@ pub trait LlmClient: Send + Sync {
         tools: Vec<ToolDefinition>,
     ) -> anyhow::Result<ChatStream> {
         match self.chat(messages, tools).await? {
-            LlmResponse::Text(text) => Ok(Box::new(tokio_stream::iter(vec![Ok(text)]))),
+            LlmResponse::Text(text) => Ok(Box::new(tokio_stream::iter(vec![Ok(StreamChunk {
+                content: Some(text),
+                reasoning_content: None,
+            })]))),
             LlmResponse::ToolCalls(_) => Err(anyhow::anyhow!("streaming 不支持工具调用")),
         }
     }

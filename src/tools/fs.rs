@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use crate::tools::schema::{
     Tool, ToolContext, ToolResult, ToolSchema, get_bool, get_i64, get_string,
 };
+use crate::util::expand_tilde;
 
 pub struct ReadFileTool;
 
@@ -117,7 +118,7 @@ impl Tool for ListDirTool {
 }
 
 fn resolve_path(working_dir: &std::path::Path, input: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(input);
+    let path = expand_tilde(input);
     let resolved = if path.is_absolute() {
         path
     } else {
