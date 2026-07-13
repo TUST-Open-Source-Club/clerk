@@ -30,7 +30,9 @@ use crate::app::App;
 use crate::config::Config;
 use crate::store::Store;
 use crate::tools::collaborate::{CollaborateParallelTool, CollaborateSequentialTool};
+use crate::tools::media::ReadMediaFile;
 use crate::tools::registry::ToolRegistry;
+use crate::tools::render_image::RenderToImage;
 use crate::tools::schema::ToolContext;
 use crate::tools::subagent::{
     SubagentCreateTool, SubagentDeleteTool, SubagentListTool, SubagentRunTool,
@@ -69,6 +71,8 @@ fn create_tool_registry(
     registry.register(Arc::new(pdf::MergePdfTool));
     registry.register(Arc::new(pdf::SplitPdfTool));
     registry.register(Arc::new(poster::PosterTool));
+    registry.register(Arc::new(ReadMediaFile));
+    registry.register(Arc::new(RenderToImage));
 
     let manager = Arc::new(SubagentManager::new(client, registry.clone()));
     registry.register(Arc::new(SubagentCreateTool::new(manager.clone())));
@@ -143,16 +147,30 @@ fn run_config_wizard<R: BufRead, W: Write>(
         std::path::PathBuf::from(working_dir_line)
     };
 
+    writer.write_all("模型是否支持图片输入 (y/N): ".as_bytes())?;
+    writer.flush()?;
+    let supports_images = parse_yes_no(&read_line(reader)?);
+
+    writer.write_all("模型是否支持视频输入 (y/N): ".as_bytes())?;
+    writer.flush()?;
+    let supports_video = parse_yes_no(&read_line(reader)?);
+
     let mut config = Config::default();
     config.llm.base_url = base_url;
     config.llm.model = model;
     config.llm.api_key = api_key;
     config.llm.timeout_seconds = timeout_seconds;
     config.working_dir = Some(working_dir);
+    config.multimodal.supports_images = supports_images;
+    config.multimodal.supports_video = supports_video;
 
     config.save(Some(path))?;
     info!("配置已保存到: {}", path.display());
     Ok(config)
+}
+
+fn parse_yes_no(line: &str) -> bool {
+    matches!(line.trim().to_lowercase().as_str(), "y" | "yes" | "是")
 }
 
 async fn run_app() -> Result<()> {
@@ -218,7 +236,7 @@ async fn run_app() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let app = App::new(store, client, registry).await?;
+    let app = App::new(store, client, registry, config.multimodal.clone()).await?;
     let result = app.run(&mut terminal).await;
 
     restore_terminal(&mut terminal)?;
@@ -240,6 +258,8 @@ fn build_system_prompt() -> String {
 - office_render: 使用 Pandoc 渲染复杂 Word/PDF/PPT（支持模板、公式、图片）
 - pdf_merge / pdf_split: PDF 合并与拆分
 - poster: HTML 转海报 PDF/PNG
+- read_media_file: 读取图片/视频文件并返回 base64 数据 URL
+- render_to_image: 将 HTML/PDF/Office/图片渲染为 PNG 预览图
 - subagent_create / subagent_run / subagent_list / subagent_delete: 创建并运行子 Agent
 - collaborate_parallel / collaborate_sequential: 多子 Agent 并行/顺序协作
 - write_skill: 将领域知识保存为 SKILL.md，供后续复用
@@ -301,6 +321,8 @@ mod tests {
         assert!(names.contains(&"subagent_create".to_string()));
         assert!(names.contains(&"collaborate_parallel".to_string()));
         assert!(names.contains(&"write_skill".to_string()));
+        assert!(names.contains(&"read_media_file".to_string()));
+        assert!(names.contains(&"render_to_image".to_string()));
     }
 
     #[test]
@@ -323,6 +345,8 @@ mod tests {
         assert!(prompt.contains("subagent_create"));
         assert!(prompt.contains("collaborate_parallel"));
         assert!(prompt.contains("write_skill"));
+        assert!(prompt.contains("read_media_file"));
+        assert!(prompt.contains("render_to_image"));
     }
 
     #[test]
@@ -338,7 +362,7 @@ mod tests {
     fn test_run_config_wizard_with_defaults() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("wizard.toml");
-        let answers = "\n\n\n\n\n";
+        let answers = "\n\n\n\n\n\n\n";
         let mut output: Vec<u8> = Vec::new();
         let config = run_config_wizard(&path, &mut Cursor::new(answers), &mut output).unwrap();
 
@@ -347,6 +371,8 @@ mod tests {
         assert!(config.llm.api_key.is_empty());
         assert_eq!(config.llm.timeout_seconds, 60);
         assert_eq!(config.working_dir, Some(env::current_dir().unwrap()));
+        assert!(!config.multimodal.supports_images);
+        assert!(!config.multimodal.supports_video);
         assert!(path.exists());
     }
 
@@ -354,7 +380,7 @@ mod tests {
     fn test_run_config_wizard_with_custom_values() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("wizard.toml");
-        let answers = "https://api.example.com/v1\ngpt-4o\nsk-123\n30\n/tmp/wd\n";
+        let answers = "https://api.example.com/v1\ngpt-4o\nsk-123\n30\n/tmp/wd\ny\ny\n";
         let mut output: Vec<u8> = Vec::new();
         let config = run_config_wizard(&path, &mut Cursor::new(answers), &mut output).unwrap();
 
@@ -366,6 +392,8 @@ mod tests {
             config.working_dir,
             Some(std::path::PathBuf::from("/tmp/wd"))
         );
+        assert!(config.multimodal.supports_images);
+        assert!(config.multimodal.supports_video);
     }
 
     struct FakeLlm;

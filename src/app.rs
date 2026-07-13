@@ -9,6 +9,7 @@ use ratatui::{
     text::Line,
     widgets::Paragraph,
 };
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
@@ -20,7 +21,9 @@ use crate::agent::{
     runner::{ReActRunner, RunnerEvent},
     session::SessionContext,
 };
+use crate::config::MultimodalConfig;
 use crate::store::{Message, Store};
+use crate::tools::media::read_media_file;
 use crate::tools::registry::ToolRegistry;
 use crate::ui::chat::ChatPanel;
 use crate::ui::input::InputArea;
@@ -40,9 +43,12 @@ pub struct App {
     pub should_quit: bool,
     pub tool_events: Vec<RunnerEvent>,
     pub yolo_mode: bool,
+    pub multimodal: MultimodalConfig,
+    pub attachments: Vec<PathBuf>,
     store: Store,
     runner: ReActRunner,
     session_ctx: SessionContext,
+    working_dir: PathBuf,
 }
 
 impl App {
@@ -50,10 +56,12 @@ impl App {
         store: Store,
         client: Arc<dyn LlmClient>,
         registry: Arc<Mutex<ToolRegistry>>,
+        multimodal: MultimodalConfig,
     ) -> Result<Self> {
         let session_id = Uuid::new_v4().to_string();
         store.create_session(&session_id, Some("新会话")).await?;
         let messages = store.list_messages(&session_id).await.unwrap_or_default();
+        let working_dir = registry.lock().await.context().working_dir.clone();
 
         info!("创建新会话: {}", session_id);
         let session_ctx = SessionContext::new(build_system_prompt());
@@ -67,9 +75,12 @@ impl App {
             should_quit: false,
             tool_events: Vec::new(),
             yolo_mode: false,
+            multimodal,
+            attachments: Vec::new(),
             store,
             runner,
             session_ctx,
+            working_dir,
         })
     }
 
@@ -78,11 +89,13 @@ impl App {
         session_id: &str,
         client: Arc<dyn LlmClient>,
         registry: Arc<Mutex<ToolRegistry>>,
+        multimodal: MultimodalConfig,
     ) -> Result<Self> {
         if store.get_session(session_id).await?.is_none() {
             store.create_session(session_id, Some("恢复会话")).await?;
         }
         let messages = store.list_messages(session_id).await?;
+        let working_dir = registry.lock().await.context().working_dir.clone();
 
         info!("加载会话: {}", session_id);
         let session_ctx = SessionContext::new(build_system_prompt());
@@ -96,9 +109,12 @@ impl App {
             should_quit: false,
             tool_events: Vec::new(),
             yolo_mode: false,
+            multimodal,
+            attachments: Vec::new(),
             store,
             runner,
             session_ctx,
+            working_dir,
         })
     }
 
@@ -127,6 +143,8 @@ impl App {
                     let text = self.input.text();
                     if text.starts_with('/') {
                         self.handle_command().await?;
+                    } else if self.try_handle_pasted_media_path().await? {
+                        // 已作为媒体附件发送
                     } else {
                         self.send_message().await?;
                     }
@@ -179,6 +197,39 @@ impl App {
         Ok(())
     }
 
+    async fn try_handle_pasted_media_path(&mut self) -> Result<bool> {
+        let text = self.input.text();
+        let trimmed = text.trim();
+        if trimmed.contains('\n') || trimmed.is_empty() {
+            return Ok(false);
+        }
+
+        let path = self.resolve_relative_path(trimmed);
+        if !path.exists() {
+            return Ok(false);
+        }
+
+        let kind = media_kind(&path);
+        let is_image = kind == Some("image");
+        let is_video = kind == Some("video");
+        if !is_image && !is_video {
+            return Ok(false);
+        }
+
+        if is_image && !self.multimodal.supports_images {
+            return Ok(false);
+        }
+        if is_video && !self.multimodal.supports_video {
+            return Ok(false);
+        }
+
+        self.attachments.push(path);
+        self.input.clear();
+        self.input.insert_str("请分析这张图片");
+        self.send_message().await?;
+        Ok(true)
+    }
+
     async fn handle_command(&mut self) -> Result<()> {
         let text = self.input.text();
         self.input.clear();
@@ -197,7 +248,10 @@ impl App {
                      /exit    退出应用\n\
                      /clear   清空聊天\n\
                      /yolo    切换 YOLO 模式（无需工具确认）\n\
-                     /sessions 列出最近会话",
+                     /sessions 列出最近会话\n\
+                     /attach <path>    附加图片/视频到下一次消息\n\
+                     /attachments      列出已附加的媒体\n\
+                     /clear_attachments 清除已附加的媒体",
                 ));
             }
             "/clear" => {
@@ -229,6 +283,34 @@ impl App {
                 self.chat
                     .push_message(system_message(&self.session_id, &content));
             }
+            "/attach" => {
+                let arg = text.strip_prefix("/attach").unwrap_or("").trim();
+                if arg.is_empty() {
+                    self.chat
+                        .push_message(system_message(&self.session_id, "用法: /attach <path>"));
+                } else {
+                    self.attach_file(arg).await?;
+                }
+            }
+            "/attachments" => {
+                let content = if self.attachments.is_empty() {
+                    "当前没有附件".to_string()
+                } else {
+                    let lines: Vec<String> = self
+                        .attachments
+                        .iter()
+                        .map(|p| format!("- {}", p.display()))
+                        .collect();
+                    format!("当前附件：\n{}", lines.join("\n"))
+                };
+                self.chat
+                    .push_message(system_message(&self.session_id, &content));
+            }
+            "/clear_attachments" => {
+                self.attachments.clear();
+                self.chat
+                    .push_message(system_message(&self.session_id, "已清除所有附件"));
+            }
             _ => {
                 self.chat.push_message(system_message(
                     &self.session_id,
@@ -239,13 +321,73 @@ impl App {
         Ok(())
     }
 
+    async fn attach_file(&mut self, arg: &str) -> Result<()> {
+        let path = self.resolve_relative_path(arg);
+        if !path.exists() {
+            self.chat.push_message(system_message(
+                &self.session_id,
+                &format!("文件不存在: {}", path.display()),
+            ));
+            return Ok(());
+        }
+
+        let kind = media_kind(&path);
+        let is_image = kind == Some("image");
+        let is_video = kind == Some("video");
+        if !is_image && !is_video {
+            self.chat
+                .push_message(system_message(&self.session_id, "仅支持图片或视频附件"));
+            return Ok(());
+        }
+
+        let mut warnings = Vec::new();
+        if is_image && !self.multimodal.supports_images {
+            warnings.push("当前模型未启用图片输入支持".to_string());
+        }
+        if is_video && !self.multimodal.supports_video {
+            warnings.push("当前模型未启用视频输入支持".to_string());
+        }
+
+        self.attachments.push(path.clone());
+        let mut msg = format!("已添加附件: {}", path.display());
+        if !warnings.is_empty() {
+            msg.push_str("\n注意: ");
+            msg.push_str(&warnings.join("，"));
+        }
+        self.chat
+            .push_message(system_message(&self.session_id, &msg));
+        Ok(())
+    }
+
+    fn resolve_relative_path(&self, input: &str) -> PathBuf {
+        let path = PathBuf::from(input);
+        if path.is_absolute() {
+            path
+        } else {
+            self.working_dir.join(path)
+        }
+    }
+
     async fn send_message(&mut self) -> Result<()> {
-        let text = self.input.text().trim().to_string();
+        let mut text = self.input.text().trim().to_string();
         if text.is_empty() {
             return Ok(());
         }
 
         self.input.clear();
+
+        if !self.attachments.is_empty() {
+            let mut descriptions = Vec::new();
+            for path in &self.attachments {
+                match read_media_file(path).await {
+                    Ok(desc) => descriptions.push(format!("附件 {}:\n{}", path.display(), desc)),
+                    Err(e) => descriptions.push(format!("附件 {} 读取失败: {}", path.display(), e)),
+                }
+            }
+            text = format!("{}\n\n{}", text, descriptions.join("\n\n"));
+            self.attachments.clear();
+        }
+
         let user_msg = self
             .store
             .add_message(&self.session_id, "user", &text)
@@ -333,6 +475,28 @@ impl App {
     }
 }
 
+fn media_kind(path: &Path) -> Option<&'static str> {
+    let mime = infer::get_from_path(path)
+        .ok()
+        .flatten()
+        .map(|k| k.mime_type().to_string())
+        .or_else(|| {
+            let ext = path.extension().and_then(|e| e.to_str())?.to_lowercase();
+            match ext.as_str() {
+                "png" | "jpg" | "jpeg" | "gif" | "webp" => Some("image/unknown".to_string()),
+                "mp4" | "webm" | "mov" | "avi" | "mkv" => Some("video/unknown".to_string()),
+                _ => None,
+            }
+        })?;
+    if mime.starts_with("image/") {
+        Some("image")
+    } else if mime.starts_with("video/") {
+        Some("video")
+    } else {
+        None
+    }
+}
+
 fn build_system_prompt() -> String {
     r#"你是一个终端办公 AI Agent，名为 Clerk。
 你可以使用以下工具帮助用户：
@@ -348,6 +512,8 @@ fn build_system_prompt() -> String {
 - office_render: 使用 Pandoc 渲染复杂 Word/PDF/PPT（支持模板、公式、图片）
 - pdf_merge / pdf_split: PDF 合并与拆分
 - poster: HTML 转海报 PDF/PNG
+- read_media_file: 读取图片/视频文件并返回 base64 数据 URL
+- render_to_image: 将 HTML/PDF/Office/图片渲染为 PNG 预览图
 - subagent_create / subagent_run / subagent_list / subagent_delete: 创建并运行子 Agent
 - collaborate_parallel / collaborate_sequential: 多子 Agent 并行/顺序协作
 - write_skill: 将领域知识保存为 SKILL.md，供后续复用
@@ -431,9 +597,35 @@ mod tests {
         let path = dir.path().join("app.db");
         let store = Store::open(&path).await.unwrap();
         let client: Arc<dyn LlmClient> = Arc::new(FakeLlm);
-        let mut registry = ToolRegistry::new(ToolContext::default());
+        let mut registry = ToolRegistry::new(ToolContext {
+            working_dir: dir.path().to_path_buf(),
+        });
         registry.register(Arc::new(FakeTool));
-        let app = App::new(store, client, Arc::new(Mutex::new(registry)))
+        let app = App::new(
+            store,
+            client,
+            Arc::new(Mutex::new(registry)),
+            MultimodalConfig::default(),
+        )
+        .await
+        .unwrap();
+        (app, dir)
+    }
+
+    async fn create_multimodal_app() -> (App, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("app.db");
+        let store = Store::open(&path).await.unwrap();
+        let client: Arc<dyn LlmClient> = Arc::new(FakeLlm);
+        let mut registry = ToolRegistry::new(ToolContext {
+            working_dir: dir.path().to_path_buf(),
+        });
+        registry.register(Arc::new(FakeTool));
+        let multimodal = MultimodalConfig {
+            supports_images: true,
+            supports_video: true,
+        };
+        let app = App::new(store, client, Arc::new(Mutex::new(registry)), multimodal)
             .await
             .unwrap();
         (app, dir)
@@ -465,11 +657,19 @@ mod tests {
             .unwrap();
 
         let client: Arc<dyn LlmClient> = Arc::new(FakeLlm);
-        let mut registry = ToolRegistry::new(ToolContext::default());
+        let mut registry = ToolRegistry::new(ToolContext {
+            working_dir: dir.path().to_path_buf(),
+        });
         registry.register(Arc::new(FakeTool));
-        let app = App::load_session(store, session_id, client, Arc::new(Mutex::new(registry)))
-            .await
-            .unwrap();
+        let app = App::load_session(
+            store,
+            session_id,
+            client,
+            Arc::new(Mutex::new(registry)),
+            MultimodalConfig::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(app.session_id, session_id);
     }
 
@@ -489,10 +689,17 @@ mod tests {
         let client: Arc<dyn LlmClient> = Arc::new(ReplyingFakeLlm {
             reply: "reply".to_string(),
         });
-        let registry = ToolRegistry::new(ToolContext::default());
-        let mut app = App::new(store, client, Arc::new(Mutex::new(registry)))
-            .await
-            .unwrap();
+        let registry = ToolRegistry::new(ToolContext {
+            working_dir: dir.path().to_path_buf(),
+        });
+        let mut app = App::new(
+            store,
+            client,
+            Arc::new(Mutex::new(registry)),
+            MultimodalConfig::default(),
+        )
+        .await
+        .unwrap();
 
         app.input.insert_char('h');
         app.input.insert_char('i');
@@ -630,5 +837,85 @@ mod tests {
         let prompt = build_system_prompt();
         assert!(prompt.contains("subagent_create"));
         assert!(prompt.contains("write_skill"));
+        assert!(prompt.contains("read_media_file"));
+        assert!(prompt.contains("render_to_image"));
+    }
+
+    #[tokio::test]
+    async fn test_attach_command_image() {
+        let (mut app, dir) = create_multimodal_app().await;
+        let img_path = dir.path().join("photo.png");
+        let img = image::RgbImage::new(10, 10);
+        img.save(&img_path).unwrap();
+
+        type_text(&mut app, "/attach photo.png").await;
+        press_enter(&mut app).await;
+
+        assert_eq!(app.attachments.len(), 1);
+        let last = app.chat.messages().last().unwrap();
+        assert_eq!(last.role, "system");
+        assert!(last.content.contains("已添加附件"));
+    }
+
+    #[tokio::test]
+    async fn test_attach_command_missing_file() {
+        let (mut app, _dir) = create_multimodal_app().await;
+        type_text(&mut app, "/attach missing.png").await;
+        press_enter(&mut app).await;
+        assert!(app.attachments.is_empty());
+        let last = app.chat.messages().last().unwrap();
+        assert!(last.content.contains("文件不存在"));
+    }
+
+    #[tokio::test]
+    async fn test_attach_command_unsupported() {
+        let (mut app, dir) = create_multimodal_app().await;
+        let txt = dir.path().join("doc.txt");
+        tokio::fs::write(&txt, "text").await.unwrap();
+
+        type_text(&mut app, "/attach doc.txt").await;
+        press_enter(&mut app).await;
+        assert!(app.attachments.is_empty());
+        let last = app.chat.messages().last().unwrap();
+        assert!(last.content.contains("仅支持图片或视频"));
+    }
+
+    #[tokio::test]
+    async fn test_attachments_and_clear_commands() {
+        let (mut app, dir) = create_multimodal_app().await;
+        let img_path = dir.path().join("a.png");
+        let img = image::RgbImage::new(10, 10);
+        img.save(&img_path).unwrap();
+
+        type_text(&mut app, "/attach a.png").await;
+        press_enter(&mut app).await;
+
+        type_text(&mut app, "/attachments").await;
+        press_enter(&mut app).await;
+        let last = app.chat.messages().last().unwrap();
+        assert!(last.content.contains("a.png"));
+
+        type_text(&mut app, "/clear_attachments").await;
+        press_enter(&mut app).await;
+        assert!(app.attachments.is_empty());
+        let last = app.chat.messages().last().unwrap();
+        assert!(last.content.contains("已清除"));
+    }
+
+    #[tokio::test]
+    async fn test_pasted_media_path_detection() {
+        let (mut app, dir) = create_multimodal_app().await;
+        let img_path = dir.path().join("pic.png");
+        let img = image::RgbImage::new(10, 10);
+        img.save(&img_path).unwrap();
+
+        type_text(&mut app, "pic.png").await;
+        press_enter(&mut app).await;
+
+        let messages = app.store.list_messages(&app.session_id).await.unwrap();
+        let user_msg = messages.iter().find(|m| m.role == "user").unwrap();
+        assert!(user_msg.content.contains("请分析这张图片"));
+        assert!(user_msg.content.contains("data:image/png;base64,"));
+        assert!(app.attachments.is_empty());
     }
 }

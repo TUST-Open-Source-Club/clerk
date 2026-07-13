@@ -50,6 +50,14 @@ pub struct StorageConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MultimodalConfig {
+    #[serde(default)]
+    pub supports_images: bool,
+    #[serde(default)]
+    pub supports_video: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub llm: LlmConfig,
@@ -57,6 +65,8 @@ pub struct Config {
     pub tui: TuiConfig,
     #[serde(default)]
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub multimodal: MultimodalConfig,
     #[serde(default)]
     pub working_dir: Option<PathBuf>,
 }
@@ -140,6 +150,10 @@ show_sidebar = true
 [storage]
 # db_path = "/path/to/clerk.db"
 
+[multimodal]
+# supports_images = true
+# supports_video = true
+
 # working_dir = "/path/to/workspace"
 "#
     .to_string()
@@ -215,6 +229,7 @@ db_path = "/tmp/test.db"
         assert!(example.contains("[llm]"));
         assert!(example.contains("api_key"));
         assert!(example.contains("[tui]"));
+        assert!(example.contains("[multimodal]"));
     }
 
     #[test]
@@ -249,6 +264,8 @@ db_path = "/tmp/test.db"
         config.llm.api_key = "sk-save".to_string();
         config.llm.timeout_seconds = 90;
         config.working_dir = Some(PathBuf::from("/tmp/wd"));
+        config.multimodal.supports_images = true;
+        config.multimodal.supports_video = true;
 
         config.save(Some(&path)).unwrap();
         let loaded = Config::load(Some(&path)).unwrap();
@@ -256,6 +273,8 @@ db_path = "/tmp/test.db"
         assert_eq!(loaded.llm.api_key, "sk-save");
         assert_eq!(loaded.llm.timeout_seconds, 90);
         assert_eq!(loaded.working_dir, Some(PathBuf::from("/tmp/wd")));
+        assert!(loaded.multimodal.supports_images);
+        assert!(loaded.multimodal.supports_video);
     }
 
     #[test]

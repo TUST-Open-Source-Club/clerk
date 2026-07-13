@@ -1,10 +1,12 @@
 pub mod browser;
 pub mod collaborate;
 pub mod fs;
+pub mod media;
 pub mod office;
 pub mod pdf;
 pub mod poster;
 pub mod registry;
+pub mod render_image;
 pub mod schema;
 pub mod shell;
 pub mod subagent;

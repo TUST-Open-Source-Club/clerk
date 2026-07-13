@@ -8,7 +8,16 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const KNOWN_COMMANDS: &[&str] = &["/help", "/exit", "/yolo", "/clear", "/sessions"];
+const KNOWN_COMMANDS: &[&str] = &[
+    "/help",
+    "/exit",
+    "/yolo",
+    "/clear",
+    "/sessions",
+    "/attach",
+    "/attachments",
+    "/clear_attachments",
+];
 
 #[derive(Debug, Clone)]
 pub struct InputArea {
@@ -49,6 +58,12 @@ impl InputArea {
         let byte_idx = byte_index_from_grapheme(line, col);
         line.insert(byte_idx, c);
         self.cursor.1 += 1;
+    }
+
+    pub fn insert_str(&mut self, s: &str) {
+        for c in s.chars() {
+            self.insert_char(c);
+        }
     }
 
     pub fn insert_newline(&mut self) {
