@@ -54,6 +54,16 @@ impl ParameterSchema {
             items: Some(Box::new(items)),
         }
     }
+
+    /// 构造 object 类型参数（自由结构 JSON 对象）。
+    pub fn object(description: impl Into<String>) -> Self {
+        Self {
+            param_type: "object".to_string(),
+            description: description.into(),
+            enum_values: None,
+            items: None,
+        }
+    }
 }
 
 /// 工具 JSON Schema（OpenAI functions 格式）
@@ -113,6 +123,15 @@ impl ToolSchema {
         required: bool,
     ) -> Self {
         self.add_param(name, ParameterSchema::array(items, description), required)
+    }
+
+    pub fn with_object(
+        self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        required: bool,
+    ) -> Self {
+        self.add_param(name, ParameterSchema::object(description), required)
     }
 
     fn add_param(

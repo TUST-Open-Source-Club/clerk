@@ -5,6 +5,7 @@ pub mod media;
 pub mod office;
 pub mod pdf;
 pub mod poster;
+pub mod ppt;
 pub mod registry;
 pub mod render_image;
 pub mod schema;

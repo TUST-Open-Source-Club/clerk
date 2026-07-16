@@ -17,7 +17,7 @@ use crate::tools::subagent::{
     SubagentCreateTool, SubagentDeleteTool, SubagentListTool, SubagentRunTool,
 };
 use crate::tools::write_skill::WriteSkillTool;
-use crate::tools::{browser, fs, office, pdf, poster, shell, web};
+use crate::tools::{browser, fs, office, pdf, poster, ppt, shell, web};
 
 /// 创建工具注册表：注册全部本地工具，再基于共享的 SubagentManager 注册子 Agent 与协作工具。
 pub fn create_tool_registry(
@@ -41,6 +41,8 @@ pub fn create_tool_registry(
     registry.register(Arc::new(office::ReadWordTool));
     registry.register(Arc::new(office::WriteWordTool));
     registry.register(Arc::new(office::RenderOfficeTool));
+    registry.register(Arc::new(ppt::WritePptTool));
+    registry.register(Arc::new(ppt::ReadPptTool));
     registry.register(Arc::new(pdf::MergePdfTool));
     registry.register(Arc::new(pdf::SplitPdfTool));
     registry.register(Arc::new(poster::PosterTool));
