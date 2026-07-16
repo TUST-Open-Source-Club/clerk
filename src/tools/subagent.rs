@@ -240,7 +240,11 @@ mod tests {
 
     fn make_manager() -> Arc<SubagentManager> {
         let client: Arc<dyn crate::agent::llm::LlmClient> = Arc::new(FakeLlm {
-            responses: tokio::sync::Mutex::new(vec![LlmResponse::Text("ok".to_string())]),
+            responses: tokio::sync::Mutex::new(vec![
+                LlmResponse::Text(r#"["执行任务"]"#.to_string()),
+                LlmResponse::Text("step done".to_string()),
+                LlmResponse::Text("ok".to_string()),
+            ]),
         });
         let mut registry = crate::tools::registry::ToolRegistry::new(ToolContext::default());
         registry.register(Arc::new(FakeTool));

@@ -253,9 +253,15 @@ mod tests {
     }
 
     fn make_manager() -> Arc<SubagentManager> {
+        // 每个子 Agent 一次运行消耗 3 条响应：计划、步骤结果、最终总结。
+        // 所有响应都包含 first/second，保证并行消费顺序不确定时断言仍成立。
         let client: Arc<dyn crate::agent::llm::LlmClient> = Arc::new(FakeLlm {
             responses: tokio::sync::Mutex::new(vec![
+                LlmResponse::Text("first plan".to_string()),
+                LlmResponse::Text("first step".to_string()),
                 LlmResponse::Text("first".to_string()),
+                LlmResponse::Text("second plan".to_string()),
+                LlmResponse::Text("second step".to_string()),
                 LlmResponse::Text("second".to_string()),
             ]),
         });

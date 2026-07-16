@@ -165,7 +165,11 @@ mod tests {
 
     fn make_manager() -> SubagentManager {
         let client: Arc<dyn LlmClient> = Arc::new(FakeLlm {
-            responses: Mutex::new(vec![LlmResponse::Text("ok".to_string())]),
+            responses: Mutex::new(vec![
+                LlmResponse::Text(r#"["执行任务"]"#.to_string()),
+                LlmResponse::Text("step done".to_string()),
+                LlmResponse::Text("ok".to_string()),
+            ]),
         });
         let mut registry = ToolRegistry::new(ToolContext::default());
         registry.register(Arc::new(FakeTool));

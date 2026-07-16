@@ -23,7 +23,7 @@ use tokio::sync::Mutex;
 use tracing::{error, info};
 
 use crate::agent::llm::OpenAiClient;
-use crate::agent::runner::ReActRunner;
+use crate::agent::runner::PlanExecuteRunner;
 use crate::agent::session::SessionContext;
 use crate::agent::subagent_manager::SubagentManager;
 use crate::app::App;
@@ -242,13 +242,13 @@ async fn run_app() -> Result<()> {
     )));
 
     if let Some(command) = args.command {
-        // 非交互模式：使用 ReActRunner 处理命令
+        // 非交互模式：使用 PlanExecuteRunner 处理命令
         info!("执行命令: {}", command);
         let session_id = uuid::Uuid::new_v4().to_string();
         store.create_session(&session_id, Some("命令会话")).await?;
         store.add_message(&session_id, "user", &command).await?;
 
-        let runner = ReActRunner::new(client, registry);
+        let runner = PlanExecuteRunner::new(client, registry);
         let mut ctx = SessionContext::new(build_system_prompt());
         let reply = runner.run(&mut ctx, &command, None).await?;
 
@@ -271,7 +271,7 @@ async fn run_app() -> Result<()> {
 }
 
 fn build_system_prompt() -> String {
-    r#"你是一个终端办公 AI Agent，名为 Clerk。
+    r#"你是一个 Plan-Execute 办公 Agent，名为 Clerk。你会先为用户请求制定执行计划，然后逐步执行，最后总结结果。
 你可以使用以下工具帮助用户：
 - fs_read: 读取文件内容
 - fs_write: 写入文件内容
@@ -290,7 +290,7 @@ fn build_system_prompt() -> String {
 - subagent_create / subagent_run / subagent_list / subagent_delete: 创建并运行子 Agent
 - collaborate_parallel / collaborate_sequential: 多子 Agent 并行/顺序协作
 - write_skill: 将领域知识保存为 SKILL.md，供后续复用
-请根据用户需求判断是否需要调用工具，并简洁地回复。"#
+请根据用户需求制定计划、逐步执行，并简洁地总结结果。"#
         .to_string()
 }
 

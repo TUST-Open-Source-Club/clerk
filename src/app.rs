@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::agent::{
     llm::{LlmClient, StreamChunk},
-    runner::{ReActRunner, RunnerEvent},
+    runner::{PlanExecuteRunner, RunnerEvent},
     session::SessionContext,
 };
 use crate::config::MultimodalConfig;
@@ -49,7 +49,7 @@ pub struct App {
     pub attachments: Vec<PathBuf>,
     pub streaming_reply: String,
     store: Store,
-    runner: ReActRunner,
+    runner: PlanExecuteRunner,
     session_ctx: Arc<Mutex<SessionContext>>,
     working_dir: PathBuf,
     stream_rx: Option<mpsc::UnboundedReceiver<StreamEvent>>,
@@ -79,7 +79,7 @@ impl App {
 
         info!("创建新会话: {}", session_id);
         let session_ctx = Arc::new(Mutex::new(SessionContext::new(build_system_prompt())));
-        let runner = ReActRunner::new(client, registry);
+        let runner = PlanExecuteRunner::new(client, registry);
 
         Ok(Self {
             session_id,
@@ -118,7 +118,7 @@ impl App {
 
         info!("加载会话: {}", session_id);
         let session_ctx = Arc::new(Mutex::new(SessionContext::new(build_system_prompt())));
-        let runner = ReActRunner::new(client, registry);
+        let runner = PlanExecuteRunner::new(client, registry);
 
         Ok(Self {
             session_id: session_id.to_string(),
@@ -630,6 +630,15 @@ fn spinner_char(frame: usize) -> char {
 
 fn format_tool_event(event: &RunnerEvent) -> String {
     match event {
+        RunnerEvent::Plan { steps } => {
+            let list = steps
+                .iter()
+                .enumerate()
+                .map(|(i, s)| format!("{}. {}", i + 1, s))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("执行计划：\n{}", list)
+        }
         RunnerEvent::ToolCall { name, arguments } => {
             let args = format_tool_arguments(name, arguments);
             format!("调用工具 {}: {}", name, args)
@@ -707,7 +716,7 @@ fn media_kind(path: &Path) -> Option<&'static str> {
 }
 
 fn build_system_prompt() -> String {
-    r#"你是一个终端办公 AI Agent，名为 Clerk。
+    r#"你是一个 Plan-Execute 办公 Agent，名为 Clerk。你会先为用户请求制定执行计划，然后逐步执行，最后总结结果。
 你可以使用以下工具帮助用户：
 - fs_read: 读取文件内容
 - fs_write: 写入文件内容
@@ -726,7 +735,7 @@ fn build_system_prompt() -> String {
 - subagent_create / subagent_run / subagent_list / subagent_delete: 创建并运行子 Agent
 - collaborate_parallel / collaborate_sequential: 多子 Agent 并行/顺序协作
 - write_skill: 将领域知识保存为 SKILL.md，供后续复用
-请根据用户需求判断是否需要调用工具，并简洁地回复。"#
+请根据用户需求制定计划、逐步执行，并简洁地总结结果。"#
         .to_string()
 }
 
@@ -1091,6 +1100,17 @@ mod tests {
         let text = format_tool_event(&event);
         assert!(text.contains("shell"));
         assert!(text.contains("ls -la"));
+    }
+
+    #[tokio::test]
+    async fn test_format_plan_event_shows_steps() {
+        let event = RunnerEvent::Plan {
+            steps: vec!["读取文件".to_string(), "总结内容".to_string()],
+        };
+        let text = format_tool_event(&event);
+        assert!(text.contains("执行计划"));
+        assert!(text.contains("1. 读取文件"));
+        assert!(text.contains("2. 总结内容"));
     }
 
     #[tokio::test]

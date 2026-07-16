@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::agent::llm::{LlmClient, ToolCall};
-use crate::agent::runner::ReActRunner;
+use crate::agent::runner::PlanExecuteRunner;
 use crate::agent::session::SessionContext;
 use crate::tools::registry::ToolRegistry;
 
@@ -46,7 +46,7 @@ impl Subagent {
 
     /// 在独立会话中运行任务，最多允许 max_iterations 轮工具调用。
     pub async fn run(&self, task: &str, max_iterations: usize) -> Result<SubagentResult> {
-        let runner = ReActRunner::new(self.client.clone(), self.registry.clone())
+        let runner = PlanExecuteRunner::new(self.client.clone(), self.registry.clone())
             .with_max_iterations(max_iterations);
         let mut session = SessionContext::new(&self.system_prompt);
         let output = runner.run(&mut session, task, None).await?;
@@ -112,7 +112,11 @@ mod tests {
     #[tokio::test]
     async fn test_subagent_text_response() {
         let client: Arc<dyn LlmClient> = Arc::new(FakeLlm {
-            responses: Mutex::new(vec![LlmResponse::Text("hello from sub".to_string())]),
+            responses: Mutex::new(vec![
+                LlmResponse::Text(r#"["回答用户问题"]"#.to_string()),
+                LlmResponse::Text("step done".to_string()),
+                LlmResponse::Text("hello from sub".to_string()),
+            ]),
         });
         let mut registry = ToolRegistry::new(ToolContext::default());
         registry.register(Arc::new(FakeTool));
@@ -134,6 +138,7 @@ mod tests {
     async fn test_subagent_tool_call() {
         let client: Arc<dyn LlmClient> = Arc::new(FakeLlm {
             responses: Mutex::new(vec![
+                LlmResponse::Text(r#"["调用工具完成任务"]"#.to_string()),
                 LlmResponse::ToolCalls(vec![ToolCall {
                     id: "1".to_string(),
                     call_type: "function".to_string(),
@@ -142,6 +147,7 @@ mod tests {
                         arguments: "{}".to_string(),
                     },
                 }]),
+                LlmResponse::Text("step done".to_string()),
                 LlmResponse::Text("after tool".to_string()),
             ]),
         });
