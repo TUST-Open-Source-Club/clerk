@@ -13,6 +13,14 @@ const attachEl = document.getElementById("attachments");
 let streaming = false;
 let currentBubble = null; // 当前流式助手气泡的内容节点
 let currentThink = null; // 当前流式推理内容节点
+let loadingBubble = null; // 首个输出块到达前的加载气泡
+let streamStartedAt = null; // 本轮生成开始时间（ms 时间戳）
+let statusTimer = null; // 状态栏与加载动画的定时器
+let spinnerIdx = 0;
+const runningTools = new Set(); // 正在执行中的工具名
+
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const DOTS_FRAMES = ["... ", ".. .", ". ..", " ..."];
 
 function scrollToBottom() {
   chatEl.scrollTop = chatEl.scrollHeight;
@@ -20,6 +28,78 @@ function scrollToBottom() {
 
 function setStatus(text) {
   statusEl.textContent = text;
+}
+
+// 流式期间的状态栏：spinner + 动画省略号 + 已耗时 + 正在执行的工具
+function renderStreamingStatus() {
+  if (!streaming || streamStartedAt === null) {
+    return;
+  }
+  const spinner = SPINNER_FRAMES[spinnerIdx % SPINNER_FRAMES.length];
+  const dots = DOTS_FRAMES[Math.floor(spinnerIdx / 2) % DOTS_FRAMES.length];
+  const elapsed = Math.floor((Date.now() - streamStartedAt) / 1000);
+  let text = `${spinner} 思考中${dots} (${elapsed}s)`;
+  if (runningTools.size > 0) {
+    text += ` · 正在执行工具: ${[...runningTools].join(", ")}`;
+  }
+  setStatus(text);
+}
+
+function updateLoadingElapsed() {
+  if (loadingBubble && streamStartedAt !== null) {
+    const elapsed = Math.floor((Date.now() - streamStartedAt) / 1000);
+    loadingBubble.querySelector(".loading-elapsed").textContent = `${elapsed}s`;
+  }
+}
+
+// 首个输出块到达前的加载气泡：CSS 跳动的三点 + 已耗时秒数
+function beginLoadingBubble() {
+  removeLoadingBubble();
+  const div = document.createElement("div");
+  div.className = "msg assistant loading";
+  const dots = document.createElement("span");
+  dots.className = "typing-dots";
+  for (let i = 0; i < 3; i++) {
+    dots.appendChild(document.createElement("span"));
+  }
+  const elapsed = document.createElement("span");
+  elapsed.className = "loading-elapsed";
+  elapsed.textContent = "0s";
+  div.appendChild(dots);
+  div.appendChild(elapsed);
+  chatEl.appendChild(div);
+  loadingBubble = div;
+  scrollToBottom();
+}
+
+function removeLoadingBubble() {
+  if (loadingBubble) {
+    loadingBubble.remove();
+    loadingBubble = null;
+  }
+}
+
+// 开始一轮生成：加载气泡 + 状态栏动画定时器
+function startStreamUi() {
+  streamStartedAt = Date.now();
+  spinnerIdx = 0;
+  beginLoadingBubble();
+  renderStreamingStatus();
+  statusTimer = setInterval(() => {
+    spinnerIdx++;
+    renderStreamingStatus();
+    updateLoadingElapsed();
+  }, 100);
+}
+
+function stopStreamUi() {
+  if (statusTimer) {
+    clearInterval(statusTimer);
+    statusTimer = null;
+  }
+  streamStartedAt = null;
+  runningTools.clear();
+  removeLoadingBubble();
 }
 
 function addMessage(role, content) {
@@ -81,6 +161,8 @@ function beginStreamBubble() {
 }
 
 function appendChunk(payload) {
+  // 首个输出块到达：撤下加载气泡，换成真正的流式气泡
+  removeLoadingBubble();
   if (!currentBubble) {
     beginStreamBubble();
   }
@@ -238,15 +320,15 @@ async function send() {
   inputEl.value = "";
   streaming = true;
   sendBtn.disabled = true;
-  setStatus("思考中...");
 
   addMessage("user", text);
   clearAttachmentChips();
-  beginStreamBubble();
+  startStreamUi();
 
   try {
     await invoke("send_message", { message: text });
   } catch (e) {
+    stopStreamUi();
     setStatus(`发送失败: ${e}`);
     streaming = false;
     sendBtn.disabled = false;
@@ -265,7 +347,19 @@ inputEl.addEventListener("paste", handlePaste);
 listen("clerk-chunk", (event) => appendChunk(event.payload));
 
 listen("clerk-tool", (event) => {
-  addMessage("tool", event.payload.text);
+  const text = event.payload.text;
+  addMessage("tool", text);
+  // 跟踪正在执行的工具，在状态栏给出执行指示（与 format_tool_event 的输出对应）
+  const call = text.match(/^调用工具 ([^:]+):/);
+  const result = text.match(/^工具 ([^ ]+) 结果:/);
+  if (call) {
+    runningTools.add(call[1].trim());
+  } else if (result) {
+    runningTools.delete(result[1].trim());
+  } else if (text.startsWith("工具错误")) {
+    runningTools.clear();
+  }
+  renderStreamingStatus();
 });
 
 listen("clerk-approval", (event) => showApproval(event.payload));
@@ -274,9 +368,13 @@ listen("clerk-file", (event) => addFileChip(event.payload));
 
 listen("clerk-done", (event) => {
   const { ok, reply, error } = event.payload;
+  stopStreamUi();
   if (ok && currentBubble && !currentBubble.textContent && !currentThink) {
-    // 非流式路径没有产出任何块时，用最终回复填充气泡
+    // 流式路径没有产出任何块时，用最终回复填充气泡
     currentBubble.textContent = reply;
+  } else if (ok && !currentBubble && reply) {
+    // 非流式路径（模型不支持流式）没有任何块，直接展示最终回复
+    addAssistantMessage(reply);
   }
   if (!ok) {
     if (currentBubble && !currentBubble.textContent && !currentThink) {

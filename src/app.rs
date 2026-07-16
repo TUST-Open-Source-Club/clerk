@@ -12,7 +12,7 @@ use ratatui::{
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::StreamExt;
 use tracing::info;
@@ -72,6 +72,10 @@ pub struct App {
     stream_abort: Option<tokio::task::AbortHandle>,
     streaming_message_added: bool,
     spinner_frame: usize,
+    /// 本轮流式生成开始时间，用于状态栏展示已耗时
+    stream_started_at: Option<Instant>,
+    /// 首个输出块到达前，聊天区加载占位消息的下标
+    placeholder_index: Option<usize>,
 }
 
 /// 待审批的工具调用：保存审批请求与一次性响应端
@@ -140,6 +144,8 @@ impl App {
             stream_abort: None,
             streaming_message_added: false,
             spinner_frame: 0,
+            stream_started_at: None,
+            placeholder_index: None,
         })
     }
 
@@ -189,6 +195,8 @@ impl App {
             stream_abort: None,
             streaming_message_added: false,
             spinner_frame: 0,
+            stream_started_at: None,
+            placeholder_index: None,
         })
     }
 
@@ -220,6 +228,12 @@ impl App {
                 _ = tick.tick() => {
                     if self.status == AppStatus::Streaming {
                         self.spinner_frame = self.spinner_frame.wrapping_add(1);
+                        // 首个输出块到达前，让占位消息中的省略号动起来
+                        if let Some(idx) = self.placeholder_index
+                            && !self.chat.update_message_at(idx, dots_frame(self.spinner_frame))
+                        {
+                            self.placeholder_index = None;
+                        }
                     }
                 }
             }
@@ -552,6 +566,8 @@ impl App {
         self.attachments.clear();
         self.streaming_reply.clear();
         self.streaming_message_added = false;
+        self.stream_started_at = None;
+        self.placeholder_index = None;
         self.approval_mode = None;
         self.status = AppStatus::Idle;
         self.chat.push_message(system_message(
@@ -602,6 +618,17 @@ impl App {
         self.streaming_message_added = false;
         self.spinner_frame = 0;
         self.stream_abort = None;
+        self.stream_started_at = Some(Instant::now());
+
+        // 首个输出块到达前，先放一条省略号动画的占位消息，避免界面看似卡死
+        self.chat.push_message(Message {
+            id: 0,
+            session_id: self.session_id.clone(),
+            role: "assistant".to_string(),
+            content: dots_frame(0).to_string(),
+            created_at: Utc::now(),
+        });
+        self.placeholder_index = Some(self.chat.messages().len() - 1);
 
         let (stream_tx, stream_rx) = mpsc::unbounded_channel::<StreamEvent>();
         self.stream_rx = Some(stream_rx);
@@ -668,6 +695,10 @@ impl App {
                     self.streaming_reply.push_str(&content);
                 }
                 if !self.streaming_message_added {
+                    // 首个输出块到达：撤下加载占位消息，换成真正的流式消息
+                    if let Some(idx) = self.placeholder_index.take() {
+                        self.chat.remove_message_at(idx);
+                    }
                     self.chat.push_message(Message {
                         id: 0,
                         session_id: self.session_id.clone(),
@@ -707,6 +738,11 @@ impl App {
             StreamEvent::Done(result) => {
                 self.stream_abort = None;
                 self.approval_mode = None;
+                self.stream_started_at = None;
+                // 没有任何输出块时，撤下仍在的加载占位消息
+                if let Some(idx) = self.placeholder_index.take() {
+                    self.chat.remove_message_at(idx);
+                }
                 if self.streaming_message_added {
                     self.chat.pop_last();
                 }
@@ -827,13 +863,16 @@ impl App {
                         )
                     }
                 }
-                AppStatus::Streaming => (
-                    format!(
-                        "{} 思考中... (Ctrl+C 中断)",
-                        spinner_char(self.spinner_frame)
-                    ),
-                    Style::default().fg(Color::Cyan),
-                ),
+                AppStatus::Streaming => {
+                    let elapsed = self
+                        .stream_started_at
+                        .map(|t| t.elapsed().as_secs())
+                        .unwrap_or(0);
+                    (
+                        streaming_status_text(self.spinner_frame, elapsed),
+                        Style::default().fg(Color::Cyan),
+                    )
+                }
                 AppStatus::Error(e) => (format!("错误: {}", e), Style::default().fg(Color::Red)),
             }
         };
@@ -872,6 +911,23 @@ impl App {
 fn spinner_char(frame: usize) -> char {
     const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     FRAMES[frame % FRAMES.len()]
+}
+
+/// 动画省略号帧：给渲染盲文效果差的终端一个纯 ASCII 的活动信号。
+/// 每两 tick（200ms）换一帧，四帧一循环。
+fn dots_frame(frame: usize) -> &'static str {
+    const FRAMES: [&str; 4] = ["... ", ".. .", ". ..", " ..."];
+    FRAMES[(frame / 2) % FRAMES.len()]
+}
+
+/// 流式状态栏文本：盲文 spinner + 动画省略号 + 已耗时秒数 + Ctrl+C 中断提示。
+fn streaming_status_text(frame: usize, elapsed_secs: u64) -> String {
+    format!(
+        "{} 思考中{} ({}s) (Ctrl+C 中断)",
+        spinner_char(frame),
+        dots_frame(frame),
+        elapsed_secs
+    )
 }
 
 /// 会话 ID 的短形式（前 8 个字符），用于状态栏展示。
@@ -1659,6 +1715,159 @@ mod tests {
         assert_eq!(first, '⠋');
         assert_eq!(spinner_char(9), '⠏');
         assert_eq!(spinner_char(10), '⠋');
+    }
+
+    #[test]
+    fn test_dots_frame_cycles() {
+        assert_eq!(dots_frame(0), "... ");
+        assert_eq!(dots_frame(1), "... ");
+        assert_eq!(dots_frame(2), ".. .");
+        assert_eq!(dots_frame(3), ".. .");
+        assert_eq!(dots_frame(4), ". ..");
+        assert_eq!(dots_frame(6), " ...");
+        // 每两帧换一档，四档（8 tick）一循环
+        assert_eq!(dots_frame(8), dots_frame(0));
+    }
+
+    #[test]
+    fn test_streaming_status_text() {
+        let text = streaming_status_text(0, 12);
+        assert!(text.contains('⠋'));
+        assert!(text.contains("思考中"));
+        assert!(text.contains("..."));
+        assert!(text.contains("(12s)"));
+        assert!(text.contains("Ctrl+C"));
+    }
+
+    /// 判断是否为加载占位消息（assistant 角色且内容全为省略号动画帧）。
+    fn is_dots_placeholder(msg: &clerk_core::store::Message) -> bool {
+        msg.role == "assistant"
+            && !msg.content.trim().is_empty()
+            && msg.content.trim().chars().all(|c| c == '.')
+    }
+
+    /// 构造一个 60 秒后才产出首个输出块的 App，用于观察等待期间的加载状态。
+    async fn create_slow_streaming_app() -> (App, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("app.db");
+        let store = Store::open(&path).await.unwrap();
+        let client: Arc<dyn LlmClient> = Arc::new(SlowStreamingFakeLlm);
+        let registry = ToolRegistry::new(ToolContext {
+            working_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        });
+        let app = App::new(
+            store,
+            client,
+            Arc::new(Mutex::new(registry)),
+            MultimodalConfig::default(),
+            test_model_info(),
+        )
+        .await
+        .unwrap();
+        (app, dir)
+    }
+
+    #[tokio::test]
+    async fn test_send_message_shows_loading_placeholder() {
+        let (mut app, _dir) = create_slow_streaming_app().await;
+        app.input.insert_str("hi");
+        app.send_message().await.unwrap();
+
+        assert_eq!(app.status, AppStatus::Streaming);
+        assert!(app.stream_started_at.is_some());
+        let idx = app.placeholder_index.expect("应存在加载占位消息");
+        let placeholder = &app.chat.messages()[idx];
+        assert_eq!(placeholder.role, "assistant");
+        assert_eq!(placeholder.content, dots_frame(0));
+
+        // 中断并结束后，占位消息被撤下，不残留省略号
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        app.handle_key(key).await.unwrap();
+        app.drain_stream().await;
+
+        assert!(app.placeholder_index.is_none());
+        assert!(app.stream_started_at.is_none());
+        assert!(!app.chat.messages().iter().any(is_dots_placeholder));
+        assert!(
+            app.chat
+                .messages()
+                .iter()
+                .any(|m| m.role == "assistant" && m.content == "生成已取消")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_first_chunk_replaces_placeholder() {
+        let (mut app, _dir) = create_slow_streaming_app().await;
+        app.input.insert_str("hi");
+        app.send_message().await.unwrap();
+        assert!(app.placeholder_index.is_some());
+
+        app.handle_stream_event(StreamEvent::Chunk(StreamChunk {
+            content: Some("你".to_string()),
+            reasoning_content: None,
+        }))
+        .await
+        .unwrap();
+
+        assert!(app.placeholder_index.is_none());
+        assert!(app.streaming_message_added);
+        assert!(!app.chat.messages().iter().any(is_dots_placeholder));
+        let last = app.chat.messages().last().unwrap();
+        assert_eq!(last.role, "assistant");
+        assert_eq!(last.content, "你");
+
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        app.handle_key(key).await.unwrap();
+        app.drain_stream().await;
+        assert!(!app.chat.messages().iter().any(is_dots_placeholder));
+    }
+
+    #[tokio::test]
+    async fn test_placeholder_removed_when_tool_events_arrive_first() {
+        let (mut app, _dir) = create_slow_streaming_app().await;
+        app.input.insert_str("hi");
+        app.send_message().await.unwrap();
+
+        // 工具事件先到：占位消息不再是最后一条
+        app.handle_stream_event(StreamEvent::ToolEvent(RunnerEvent::Plan {
+            steps: vec!["步骤一".to_string()],
+        }))
+        .await
+        .unwrap();
+        assert!(app.placeholder_index.is_some());
+        assert_eq!(app.chat.messages().last().unwrap().role, "tool");
+
+        // 首个输出块到达时仍能正确定位并撤下占位消息
+        app.handle_stream_event(StreamEvent::Chunk(StreamChunk {
+            content: Some("hi".to_string()),
+            reasoning_content: None,
+        }))
+        .await
+        .unwrap();
+
+        assert!(app.placeholder_index.is_none());
+        assert!(!app.chat.messages().iter().any(is_dots_placeholder));
+        assert_eq!(app.chat.messages().last().unwrap().content, "hi");
+
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        app.handle_key(key).await.unwrap();
+        app.drain_stream().await;
+    }
+
+    #[tokio::test]
+    async fn test_draw_shows_streaming_elapsed_and_ctrl_c_hint() {
+        let (mut app, _dir) = create_test_app().await;
+        app.status = AppStatus::Streaming;
+        app.stream_started_at = Some(Instant::now());
+        let backend = ratatui::backend::TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let content = compact_buffer_text(terminal.backend().buffer());
+        assert!(content.contains("思考中"));
+        assert!(content.contains("(0s)"));
+        assert!(content.contains("Ctrl+C"));
     }
 
     #[tokio::test]

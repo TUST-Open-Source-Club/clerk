@@ -54,6 +54,26 @@ impl ChatPanel {
         msg
     }
 
+    /// 更新指定下标消息的内容（加载占位动画用）；越界时返回 false。
+    pub fn update_message_at(&mut self, index: usize, content: impl Into<String>) -> bool {
+        if let Some(msg) = self.messages.get_mut(index) {
+            msg.content = content.into();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 移除指定下标的消息（撤下加载占位用）；越界时返回 None。
+    pub fn remove_message_at(&mut self, index: usize) -> Option<Message> {
+        if index < self.messages.len() {
+            self.scroll = 0;
+            Some(self.messages.remove(index))
+        } else {
+            None
+        }
+    }
+
     pub fn set_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
         self.scroll = 0;
@@ -221,6 +241,28 @@ mod tests {
         let text = buf.content.iter().map(|c| c.symbol()).collect::<String>();
         assert!(text.contains("hello"));
         assert!(text.contains("assistant"));
+    }
+
+    #[test]
+    fn test_update_message_at() {
+        let mut panel = ChatPanel::new(vec![make_msg("user", "a"), make_msg("assistant", "b")]);
+        assert!(panel.update_message_at(1, "c"));
+        assert_eq!(panel.messages()[1].content, "c");
+        assert!(!panel.update_message_at(5, "x"));
+    }
+
+    #[test]
+    fn test_remove_message_at() {
+        let mut panel = ChatPanel::new(vec![
+            make_msg("user", "a"),
+            make_msg("assistant", "b"),
+            make_msg("user", "c"),
+        ]);
+        let removed = panel.remove_message_at(1).unwrap();
+        assert_eq!(removed.content, "b");
+        assert_eq!(panel.messages().len(), 2);
+        assert_eq!(panel.messages()[1].content, "c");
+        assert!(panel.remove_message_at(9).is_none());
     }
 
     #[test]
