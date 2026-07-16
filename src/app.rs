@@ -6,11 +6,11 @@ use ratatui::{
     backend::Backend,
     layout::{Constraint, Direction, Layout, Position},
     style::{Color, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::Paragraph,
 };
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
@@ -31,7 +31,7 @@ use clerk_core::text::{format_tool_arguments, format_tool_event};
 use clerk_core::tools::registry::ToolRegistry;
 
 use crate::ui::chat::ChatPanel;
-use crate::ui::input::InputArea;
+use crate::ui::input::{InputArea, KNOWN_COMMANDS, longest_common_prefix};
 
 /// 应用状态：空闲 / 正在流式生成 / 出错。
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +39,13 @@ pub enum AppStatus {
     Idle,
     Streaming,
     Error(String),
+}
+
+/// 状态栏与 /model 命令展示的模型信息。
+#[derive(Debug, Clone)]
+pub struct ModelInfo {
+    pub model: String,
+    pub base_url: String,
 }
 
 /// TUI 应用：持有会话状态、UI 组件、Agent runner 与流式/审批通道。
@@ -53,6 +60,7 @@ pub struct App {
     /// 等待用户审批的工具调用；Some 表示 UI 处于审批模式
     pub approval_mode: Option<PendingApproval>,
     pub multimodal: MultimodalConfig,
+    pub model_info: ModelInfo,
     pub attachments: Vec<PathBuf>,
     pub streaming_reply: String,
     store: Store,
@@ -94,6 +102,7 @@ impl App {
         client: Arc<dyn LlmClient>,
         registry: Arc<Mutex<ToolRegistry>>,
         multimodal: MultimodalConfig,
+        model_info: ModelInfo,
     ) -> Result<Self> {
         let session_id = Uuid::new_v4().to_string();
         store.create_session(&session_id, Some("新会话")).await?;
@@ -119,6 +128,7 @@ impl App {
             yolo_mode,
             approval_mode: None,
             multimodal,
+            model_info,
             attachments: Vec::new(),
             streaming_reply: String::new(),
             store,
@@ -140,6 +150,7 @@ impl App {
         client: Arc<dyn LlmClient>,
         registry: Arc<Mutex<ToolRegistry>>,
         multimodal: MultimodalConfig,
+        model_info: ModelInfo,
     ) -> Result<Self> {
         if store.get_session(session_id).await?.is_none() {
             store.create_session(session_id, Some("恢复会话")).await?;
@@ -166,6 +177,7 @@ impl App {
             yolo_mode,
             approval_mode: None,
             multimodal,
+            model_info,
             attachments: Vec::new(),
             streaming_reply: String::new(),
             store,
@@ -255,7 +267,11 @@ impl App {
                 }
             }
             KeyCode::Tab => {
-                self.input.autocomplete();
+                if self.input.text().starts_with("/attach ") {
+                    self.complete_attach_path();
+                } else {
+                    self.input.autocomplete();
+                }
             }
             KeyCode::Char(c) => {
                 if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -355,7 +371,7 @@ impl App {
         Ok(true)
     }
 
-    /// 处理斜杠命令（/help、/exit、/yolo、/sessions、/attach 等）。
+    /// 处理斜杠命令（/help、/exit、/new、/model、/yolo、/sessions、/attach 等）。
     async fn handle_command(&mut self) -> Result<()> {
         let text = self.input.text();
         self.input.clear();
@@ -367,18 +383,25 @@ impl App {
                 self.should_quit = true;
             }
             "/help" => {
+                let lines: Vec<String> = KNOWN_COMMANDS
+                    .iter()
+                    .map(|(cmd, desc)| format!("{:<20} {}", cmd, desc))
+                    .collect();
                 self.chat.push_message(system_message(
                     &self.session_id,
-                    "可用命令：\n\
-                     /help    显示帮助\n\
-                     /exit    退出应用\n\
-                     /clear   清空聊天\n\
-                     /yolo    切换 YOLO 模式（无需工具确认）\n\
-                     /sessions 列出最近会话\n\
-                     /attach <path>    附加图片/视频到下一次消息\n\
-                     /attachments      列出已附加的媒体\n\
-                     /clear_attachments 清除已附加的媒体",
+                    &format!("可用命令：\n{}", lines.join("\n")),
                 ));
+            }
+            "/new" => {
+                self.start_new_session().await?;
+            }
+            "/model" => {
+                let content = format!(
+                    "当前模型: {}\n接口地址: {}",
+                    self.model_info.model, self.model_info.base_url
+                );
+                self.chat
+                    .push_message(system_message(&self.session_id, &content));
             }
             "/clear" => {
                 self.chat.clear();
@@ -506,6 +529,49 @@ impl App {
             path
         } else {
             self.working_dir.join(path)
+        }
+    }
+
+    /// 开始新会话：中断进行中的流式任务，重置会话上下文与 UI 状态。
+    async fn start_new_session(&mut self) -> Result<()> {
+        if let Some(abort) = self.stream_abort.take() {
+            abort.abort();
+        }
+        self.stream_rx = None;
+
+        let session_id = Uuid::new_v4().to_string();
+        self.store
+            .create_session(&session_id, Some("新会话"))
+            .await?;
+        info!("开始新会话: {}", session_id);
+        self.session_id = session_id;
+        // 整体替换 Arc，避免影响仍在收尾的旧流式任务持有的上下文
+        self.session_ctx = Arc::new(Mutex::new(SessionContext::new(build_system_prompt())));
+        self.chat.clear();
+        self.tool_events.clear();
+        self.attachments.clear();
+        self.streaming_reply.clear();
+        self.streaming_message_added = false;
+        self.approval_mode = None;
+        self.status = AppStatus::Idle;
+        self.chat.push_message(system_message(
+            &self.session_id,
+            &format!("已开始新会话 ({})", short_id(&self.session_id)),
+        ));
+        Ok(())
+    }
+
+    /// /attach 的文件路径补全：用工作目录下匹配项的最长公共前缀替换参数。
+    fn complete_attach_path(&mut self) {
+        let text = self.input.text();
+        let Some(partial) = text.strip_prefix("/attach ") else {
+            return;
+        };
+        if let Some(completed) = complete_file_path(partial, &self.working_dir)
+            && completed != partial
+        {
+            self.input.clear();
+            self.input.insert_str(&format!("/attach {}", completed));
         }
     }
 
@@ -694,54 +760,171 @@ impl App {
         }
     }
 
-    /// 绘制界面：上为聊天区，中为输入区（并定位光标），下为状态栏。
+    /// 绘制界面：聊天区、命令提示区（输入 / 时出现）、输入区（并定位光标）与两行状态栏。
     fn draw(&self, frame: &mut Frame) {
+        let suggestions = self.input.command_suggestions();
+        let hint_height = suggestions.len().min(5) as u16;
+
+        let mut constraints = vec![Constraint::Min(10)];
+        if hint_height > 0 {
+            constraints.push(Constraint::Length(hint_height));
+        }
+        constraints.push(Constraint::Length(6));
+        constraints.push(Constraint::Length(2));
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
-            .constraints([
-                Constraint::Min(10),
-                Constraint::Length(6),
-                Constraint::Length(1),
-            ])
+            .constraints(constraints)
             .split(frame.area());
 
         frame.render_widget(&self.chat, chunks[0]);
-        frame.render_widget(&self.input, chunks[1]);
 
-        let (cursor_x, cursor_y) = self.input.cursor_screen_pos(chunks[1]);
+        let input_idx = chunks.len() - 2;
+        let status_idx = chunks.len() - 1;
+
+        if hint_height > 0 {
+            let hint_lines: Vec<Line> = suggestions
+                .iter()
+                .take(5)
+                .map(|(cmd, desc)| {
+                    Line::from(vec![
+                        Span::styled(format!("  {:<20}", cmd), Style::default().fg(Color::Cyan)),
+                        Span::styled(*desc, Style::default().fg(Color::DarkGray)),
+                    ])
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(hint_lines), chunks[1]);
+        }
+
+        frame.render_widget(&self.input, chunks[input_idx]);
+
+        let (cursor_x, cursor_y) = self.input.cursor_screen_pos(chunks[input_idx]);
         frame.set_cursor_position(Position::new(
-            chunks[1].x + cursor_x,
-            chunks[1].y + cursor_y,
+            chunks[input_idx].x + cursor_x,
+            chunks[input_idx].y + cursor_y,
         ));
 
-        let status_text = if let Some(pending) = &self.approval_mode {
-            format!("[tool] approve {}? (y/n)", pending.name)
+        // 状态栏第一行：运行状态（审批 / 流式 / 错误 / 就绪）
+        let (state_text, state_style) = if let Some(pending) = &self.approval_mode {
+            (
+                format!("[tool] approve {}? (y/n)", pending.name),
+                Style::default().fg(Color::Yellow),
+            )
         } else {
             match &self.status {
                 AppStatus::Idle => {
                     if self.tool_events.is_empty() {
-                        "就绪 | /exit 退出 | Enter 发送 | Shift+Enter 换行 | Shift+↑/↓ 滚动聊天"
-                            .to_string()
+                        (
+                            "就绪 | Enter 发送 | Shift+Enter 换行 | / 命令 | Shift+↑/↓ 滚动"
+                                .to_string(),
+                            Style::default().fg(Color::Gray),
+                        )
                     } else {
-                        format!("最近工具调用: {} 次", self.tool_events.len())
+                        (
+                            format!("最近工具调用: {} 次", self.tool_events.len()),
+                            Style::default().fg(Color::Gray),
+                        )
                     }
                 }
-                AppStatus::Streaming => {
-                    format!("{} 思考中...", spinner_char(self.spinner_frame))
-                }
-                AppStatus::Error(e) => format!("错误: {}", e),
+                AppStatus::Streaming => (
+                    format!(
+                        "{} 思考中... (Ctrl+C 中断)",
+                        spinner_char(self.spinner_frame)
+                    ),
+                    Style::default().fg(Color::Cyan),
+                ),
+                AppStatus::Error(e) => (format!("错误: {}", e), Style::default().fg(Color::Red)),
             }
         };
-        let status =
-            Paragraph::new(Line::from(status_text)).style(Style::default().fg(Color::Gray));
-        frame.render_widget(status, chunks[2]);
+
+        // 状态栏第二行：模型 | 工作目录 | 会话 | 审批模式
+        let approval_span = if self.yolo_mode {
+            Span::styled("YOLO 开", Style::default().fg(Color::Green))
+        } else {
+            Span::styled("手动审批", Style::default().fg(Color::Yellow))
+        };
+        let sep = Span::styled(" | ", Style::default().fg(Color::DarkGray));
+        let info_line = Line::from(vec![
+            Span::styled(
+                self.model_info.model.clone(),
+                Style::default().fg(Color::Cyan),
+            ),
+            sep.clone(),
+            Span::styled(
+                self.working_dir.display().to_string(),
+                Style::default().fg(Color::Blue),
+            ),
+            sep.clone(),
+            Span::styled(
+                format!("session {}", short_id(&self.session_id)),
+                Style::default().fg(Color::Gray),
+            ),
+            sep,
+            approval_span,
+        ]);
+
+        let status = Paragraph::new(vec![Line::from(state_text).style(state_style), info_line]);
+        frame.render_widget(status, chunks[status_idx]);
     }
 }
 
 fn spinner_char(frame: usize) -> char {
     const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     FRAMES[frame % FRAMES.len()]
+}
+
+/// 会话 ID 的短形式（前 8 个字符），用于状态栏展示。
+fn short_id(id: &str) -> &str {
+    let end = id.char_indices().nth(8).map(|(i, _)| i).unwrap_or(id.len());
+    &id[..end]
+}
+
+/// /attach 的文件路径补全：以 `working_dir` 为基准解析 `partial` 的目录部分，
+/// 返回目录内匹配项的最长公共前缀路径；唯一的目录匹配会追加 `/` 以便继续输入。
+/// 无匹配或无法继续延长时返回 None。
+fn complete_file_path(partial: &str, working_dir: &Path) -> Option<String> {
+    let (dir_part, prefix) = match partial.rfind('/') {
+        Some(idx) => (&partial[..=idx], &partial[idx + 1..]),
+        None => ("", partial),
+    };
+    let dir = if dir_part.is_empty() {
+        working_dir.to_path_buf()
+    } else {
+        let p = PathBuf::from(dir_part.trim_end_matches('/'));
+        if p.is_absolute() {
+            p
+        } else {
+            working_dir.join(p)
+        }
+    };
+
+    let mut matches: Vec<String> = std::fs::read_dir(&dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            if !name.starts_with(prefix) {
+                return None;
+            }
+            if prefix.is_empty() && name.starts_with('.') {
+                return None; // 空前缀时不提示隐藏文件
+            }
+            if e.path().is_dir() {
+                Some(format!("{}/", name))
+            } else {
+                Some(name)
+            }
+        })
+        .collect();
+    matches.sort();
+
+    let refs: Vec<&str> = matches.iter().map(String::as_str).collect();
+    let lcp = longest_common_prefix(&refs);
+    if lcp.len() <= prefix.len() {
+        return None;
+    }
+    Some(format!("{}{}", dir_part, lcp))
 }
 
 /// 构造一条仅用于 UI 展示的系统消息（不落库，id 为 0）。
@@ -885,6 +1068,13 @@ mod tests {
         }
     }
 
+    fn test_model_info() -> ModelInfo {
+        ModelInfo {
+            model: "test-model".to_string(),
+            base_url: "https://test.example/v1".to_string(),
+        }
+    }
+
     async fn create_test_app() -> (App, TempDir) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("app.db");
@@ -900,6 +1090,7 @@ mod tests {
             client,
             Arc::new(Mutex::new(registry)),
             MultimodalConfig::default(),
+            test_model_info(),
         )
         .await
         .unwrap();
@@ -920,9 +1111,15 @@ mod tests {
             supports_images: true,
             supports_video: true,
         };
-        let app = App::new(store, client, Arc::new(Mutex::new(registry)), multimodal)
-            .await
-            .unwrap();
+        let app = App::new(
+            store,
+            client,
+            Arc::new(Mutex::new(registry)),
+            multimodal,
+            test_model_info(),
+        )
+        .await
+        .unwrap();
         (app, dir)
     }
 
@@ -939,6 +1136,19 @@ mod tests {
             .await
             .unwrap();
         app.drain_stream().await;
+    }
+
+    /// 收集缓冲区文本并去除空白：宽字符（CJK）会将其后的单元格重置为空格，
+    /// 直接拼接无法在宽字符附近匹配子串，因此断言前先去掉所有空白。
+    fn compact_buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+        buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect()
     }
 
     #[tokio::test]
@@ -964,6 +1174,7 @@ mod tests {
             client,
             Arc::new(Mutex::new(registry)),
             MultimodalConfig::default(),
+            test_model_info(),
         )
         .await
         .unwrap();
@@ -995,6 +1206,7 @@ mod tests {
             client,
             Arc::new(Mutex::new(registry)),
             MultimodalConfig::default(),
+            test_model_info(),
         )
         .await
         .unwrap();
@@ -1068,6 +1280,7 @@ mod tests {
             client,
             Arc::new(Mutex::new(registry)),
             MultimodalConfig::default(),
+            test_model_info(),
         )
         .await
         .unwrap();
@@ -1220,6 +1433,7 @@ mod tests {
             client,
             Arc::new(Mutex::new(registry)),
             MultimodalConfig::default(),
+            test_model_info(),
         )
         .await
         .unwrap();
@@ -1464,6 +1678,7 @@ mod tests {
             client,
             Arc::new(Mutex::new(registry)),
             MultimodalConfig::default(),
+            test_model_info(),
         )
         .await
         .unwrap();
@@ -1503,6 +1718,7 @@ mod tests {
             client,
             Arc::new(Mutex::new(registry)),
             MultimodalConfig::default(),
+            test_model_info(),
         )
         .await
         .unwrap();
@@ -1591,5 +1807,149 @@ mod tests {
         assert!(user_msg.content.contains("请分析这张图片"));
         assert!(user_msg.content.contains("data:image/png;base64,"));
         assert!(app.attachments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_new_command_starts_new_session() {
+        let (mut app, _dir) = create_test_app().await;
+        let old_session = app.session_id.clone();
+        type_text(&mut app, "/help").await;
+        press_enter(&mut app).await;
+        assert!(!app.chat.messages().is_empty());
+
+        type_text(&mut app, "/new").await;
+        press_enter(&mut app).await;
+
+        assert_ne!(app.session_id, old_session);
+        assert!(
+            app.store
+                .get_session(&app.session_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // 旧消息被清空，只有一条新会话提示
+        assert_eq!(app.chat.messages().len(), 1);
+        let last = app.chat.messages().last().unwrap();
+        assert_eq!(last.role, "system");
+        assert!(last.content.contains("已开始新会话"));
+        assert!(app.tool_events.is_empty());
+        assert_eq!(app.status, AppStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn test_model_command_shows_model_and_base_url() {
+        let (mut app, _dir) = create_test_app().await;
+        type_text(&mut app, "/model").await;
+        press_enter(&mut app).await;
+        let last = app.chat.messages().last().unwrap();
+        assert_eq!(last.role, "system");
+        assert!(last.content.contains("test-model"));
+        assert!(last.content.contains("https://test.example/v1"));
+    }
+
+    #[tokio::test]
+    async fn test_draw_shows_status_info() {
+        let (app, dir) = create_test_app().await;
+        let backend = ratatui::backend::TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let content = compact_buffer_text(terminal.backend().buffer());
+        assert!(content.contains("test-model"));
+        assert!(content.contains(dir.path().to_str().unwrap()));
+        assert!(content.contains(&app.session_id[..8]));
+        assert!(content.contains("手动审批"));
+        assert!(content.contains("就绪"));
+    }
+
+    #[tokio::test]
+    async fn test_draw_shows_yolo_status_when_enabled() {
+        let (mut app, _dir) = create_test_app().await;
+        type_text(&mut app, "/yolo").await;
+        press_enter(&mut app).await;
+        let backend = ratatui::backend::TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let content = compact_buffer_text(terminal.backend().buffer());
+        assert!(content.contains("YOLO开"));
+    }
+
+    #[tokio::test]
+    async fn test_draw_shows_welcome_when_chat_empty() {
+        let (app, _dir) = create_test_app().await;
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let content = compact_buffer_text(terminal.backend().buffer());
+        assert!(content.contains("Clerk"));
+        assert!(content.contains("输入消息开始对话"));
+    }
+
+    #[tokio::test]
+    async fn test_draw_shows_command_suggestions() {
+        let (mut app, _dir) = create_test_app().await;
+        type_text(&mut app, "/").await;
+        let backend = ratatui::backend::TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let content = compact_buffer_text(terminal.backend().buffer());
+        assert!(content.contains("/help"));
+        assert!(content.contains("显示帮助"));
+        assert!(content.contains("/model"));
+    }
+
+    #[tokio::test]
+    async fn test_draw_shows_placeholder_when_input_empty() {
+        let (app, _dir) = create_test_app().await;
+        let backend = ratatui::backend::TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let content = compact_buffer_text(terminal.backend().buffer());
+        assert!(content.contains("输入消息，/查看命令"));
+    }
+
+    #[test]
+    fn test_short_id() {
+        assert_eq!(short_id("abcdefgh-1234-5678"), "abcdefgh");
+        assert_eq!(short_id("short"), "short");
+    }
+
+    #[test]
+    fn test_complete_file_path() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("photo.png"), "img").unwrap();
+        std::fs::write(dir.path().join("phone.txt"), "txt").unwrap();
+        std::fs::write(dir.path().join("pic.png"), "img").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("inner.png"), "img").unwrap();
+        let wd = dir.path();
+
+        // 唯一文件匹配补全为完整文件名
+        assert_eq!(complete_file_path("pi", wd), Some("pic.png".to_string()));
+        // 多个匹配补全到最长公共前缀
+        assert_eq!(complete_file_path("ph", wd), Some("pho".to_string()));
+        // 已是最长公共前缀时不再变化
+        assert_eq!(complete_file_path("pho", wd), None);
+        // 目录匹配追加 /
+        assert_eq!(complete_file_path("su", wd), Some("sub/".to_string()));
+        // 子目录内补全
+        assert_eq!(
+            complete_file_path("sub/in", wd),
+            Some("sub/inner.png".to_string())
+        );
+        // 无匹配
+        assert_eq!(complete_file_path("zzz", wd), None);
+    }
+
+    #[tokio::test]
+    async fn test_attach_path_tab_completion() {
+        let (mut app, dir) = create_multimodal_app().await;
+        let img_path = dir.path().join("photo.png");
+        let img = image::RgbImage::new(10, 10);
+        img.save(&img_path).unwrap();
+
+        type_text(&mut app, "/attach ph").await;
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await.unwrap();
+        assert_eq!(app.input.text(), "/attach photo.png");
     }
 }

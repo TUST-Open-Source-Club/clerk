@@ -8,17 +8,25 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-/// 输入框已知的斜杠命令，用于 Tab 补全与命令提示。
-const KNOWN_COMMANDS: &[&str] = &[
-    "/help",
-    "/exit",
-    "/yolo",
-    "/clear",
-    "/sessions",
-    "/attach",
-    "/attachments",
-    "/clear_attachments",
+/// 输入框已知的斜杠命令及描述，用于 Tab 补全、命令提示与 /help。
+pub const KNOWN_COMMANDS: &[(&str, &str)] = &[
+    ("/help", "显示帮助"),
+    ("/new", "开始新会话"),
+    ("/model", "查看当前模型与接口地址"),
+    ("/yolo", "切换 YOLO 模式（工具免确认）"),
+    ("/clear", "清空聊天"),
+    ("/sessions", "列出最近会话"),
+    ("/attach", "附加图片/视频到下一次消息"),
+    ("/attachments", "列出已附加的媒体"),
+    ("/clear_attachments", "清除已附加的媒体"),
+    ("/exit", "退出应用"),
 ];
+
+/// 输入框为空时展示的占位提示。
+const PLACEHOLDER: &str = "输入消息，/ 查看命令，Tab 补全";
+
+/// 输入长度超过该阈值时在标题中显示字数统计。
+const INPUT_COUNT_THRESHOLD: usize = 200;
 
 /// 多行输入框：以 grapheme 为单位维护光标，支持中文等宽字符与斜杠命令补全。
 #[derive(Debug, Clone)]
@@ -172,8 +180,8 @@ impl InputArea {
         let token = text.split_whitespace().next().unwrap_or("");
         let matches: Vec<&str> = KNOWN_COMMANDS
             .iter()
+            .map(|(cmd, _)| *cmd)
             .filter(|cmd| cmd.starts_with(token))
-            .copied()
             .collect();
         if matches.is_empty() {
             return;
@@ -200,11 +208,23 @@ impl InputArea {
         let token = text.split_whitespace().next().unwrap_or("");
         KNOWN_COMMANDS
             .iter()
-            .find(|cmd| {
-                let &&c = cmd;
-                c.starts_with(token) && c != token
-            })
+            .map(|(cmd, _)| *cmd)
+            .find(|cmd| cmd.starts_with(token) && *cmd != token)
             .map(|cmd| cmd[token.len()..].to_string())
+    }
+
+    /// 当前输入匹配的斜杠命令建议（命令, 描述），用于输入框上方的提示区。
+    /// 仅在输入以 `/` 开头且仍在输入命令名（无空白字符）时返回。
+    pub fn command_suggestions(&self) -> Vec<(&'static str, &'static str)> {
+        let text = self.text();
+        if !text.starts_with('/') || text.contains(char::is_whitespace) {
+            return Vec::new();
+        }
+        KNOWN_COMMANDS
+            .iter()
+            .filter(|(cmd, _)| cmd.starts_with(text.as_str()))
+            .copied()
+            .collect()
     }
 
     /// Computes the cursor's `(x, y)` screen coordinates relative to the
@@ -233,15 +253,26 @@ impl InputArea {
 
 impl Widget for &InputArea {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        let mut title = "输入 (Enter 发送 · Shift+Enter 换行)".to_string();
+        let count: usize = self.lines.iter().map(|l| grapheme_count(l)).sum();
+        if count > INPUT_COUNT_THRESHOLD {
+            title.push_str(&format!(" [{} 字]", count));
+        }
+        let block = Block::default().borders(Borders::ALL).title(title);
+
+        if self.is_empty() {
+            Paragraph::new(Line::from(PLACEHOLDER))
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block)
+                .render(area, buf);
+            return;
+        }
+
         let width = area.width.saturating_sub(2) as usize;
         let wrapped = wrap_lines(&self.lines, width.max(1));
         let text = Text::from(wrapped.into_iter().map(Line::from).collect::<Vec<_>>());
         Paragraph::new(text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("输入 (Enter 发送, Shift+Enter 换行, /exit 退出, Tab 补全)"),
-            )
+            .block(block)
             .style(Style::default().fg(Color::White))
             .render(area, buf);
     }
@@ -326,7 +357,7 @@ fn wrapped_line_count(s: &str, width: usize) -> usize {
 }
 
 /// 计算一组字符串的最长公共前缀。
-fn longest_common_prefix(strs: &[&str]) -> String {
+pub(crate) fn longest_common_prefix(strs: &[&str]) -> String {
     if strs.is_empty() {
         return String::new();
     }
@@ -530,6 +561,96 @@ mod tests {
         input.clear();
         input.insert_char('h');
         assert_eq!(input.command_hint(), None);
+    }
+
+    #[test]
+    fn test_command_suggestions_all_on_slash() {
+        let mut input = InputArea::new();
+        input.insert_char('/');
+        let suggestions = input.command_suggestions();
+        assert_eq!(suggestions.len(), KNOWN_COMMANDS.len());
+        assert!(suggestions.contains(&("/help", "显示帮助")));
+        assert!(suggestions.contains(&("/new", "开始新会话")));
+        assert!(suggestions.contains(&("/model", "查看当前模型与接口地址")));
+    }
+
+    #[test]
+    fn test_command_suggestions_filtered() {
+        let mut input = InputArea::new();
+        for c in "/cl".chars() {
+            input.insert_char(c);
+        }
+        let suggestions = input.command_suggestions();
+        let names: Vec<&str> = suggestions.iter().map(|(cmd, _)| *cmd).collect();
+        assert!(names.contains(&"/clear"));
+        assert!(names.contains(&"/clear_attachments"));
+        assert!(!names.contains(&"/help"));
+    }
+
+    #[test]
+    fn test_command_suggestions_hidden_when_not_typing_command() {
+        let mut input = InputArea::new();
+        input.insert_char('h');
+        assert!(input.command_suggestions().is_empty());
+
+        // 命令名之后输入参数时不再提示
+        input.clear();
+        for c in "/attach foo".chars() {
+            input.insert_char(c);
+        }
+        assert!(input.command_suggestions().is_empty());
+    }
+
+    #[test]
+    fn test_autocomplete_new_command() {
+        let mut input = InputArea::new();
+        for c in "/ne".chars() {
+            input.insert_char(c);
+        }
+        input.autocomplete();
+        assert_eq!(input.text(), "/new ");
+    }
+
+    /// 收集缓冲区文本并去除空白（宽字符会将其后的单元格重置为空格）。
+    fn compact_buffer_text(buf: &Buffer) -> String {
+        buf.content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect()
+    }
+
+    #[test]
+    fn test_placeholder_rendered_when_empty() {
+        let input = InputArea::new();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
+        input.render(buf.area, &mut buf);
+        let text = compact_buffer_text(&buf);
+        assert!(text.contains("输入消息"));
+    }
+
+    #[test]
+    fn test_placeholder_hidden_with_text() {
+        let mut input = InputArea::new();
+        input.insert_char('a');
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 5));
+        input.render(buf.area, &mut buf);
+        let text = compact_buffer_text(&buf);
+        assert!(!text.contains("输入消息，/"));
+    }
+
+    #[test]
+    fn test_length_counter_shown_over_threshold() {
+        let mut input = InputArea::new();
+        for _ in 0..201 {
+            input.insert_char('a');
+        }
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 12));
+        input.render(buf.area, &mut buf);
+        let text = compact_buffer_text(&buf);
+        assert!(text.contains("[201字]"));
     }
 
     #[test]

@@ -20,7 +20,7 @@ use clerk_core::config::Config;
 use clerk_core::store::Store;
 use clerk_core::util::expand_tilde;
 
-use crate::app::App;
+use crate::app::{App, ModelInfo};
 
 /// 初始化日志：按 RUST_LOG 环境变量过滤，写入数据目录下的 clerk.log。
 fn setup_logging() -> Result<()> {
@@ -209,7 +209,18 @@ async fn run_app() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let app = App::new(store, client, registry, config.multimodal.clone()).await?;
+    let model_info = ModelInfo {
+        model: config.llm.model.clone(),
+        base_url: config.llm.base_url.clone(),
+    };
+    let app = App::new(
+        store,
+        client,
+        registry,
+        config.multimodal.clone(),
+        model_info,
+    )
+    .await?;
     let result = app.run(&mut terminal).await;
 
     restore_terminal(&mut terminal)?;
