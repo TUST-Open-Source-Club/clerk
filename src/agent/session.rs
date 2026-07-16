@@ -9,6 +9,7 @@ pub struct SessionContext {
 }
 
 impl SessionContext {
+    /// 创建会话上下文，默认保留最近 50 条历史消息。
     pub fn new(system_prompt: impl Into<String>) -> Self {
         Self {
             system_prompt: system_prompt.into(),
@@ -17,6 +18,7 @@ impl SessionContext {
         }
     }
 
+    /// 追加一条消息并按 max_history 裁剪历史。
     pub fn add_message(&mut self, message: Message) {
         self.messages.push(message);
         self.trim_history();
@@ -26,12 +28,14 @@ impl SessionContext {
         self.system_prompt = prompt.into();
     }
 
+    /// 组装发送给 LLM 的消息：系统提示词 + 历史消息。
     pub fn build_messages(&self) -> Vec<Message> {
         let mut result = vec![Message::system(self.system_prompt.clone())];
         result.extend(self.messages.iter().cloned());
         result
     }
 
+    /// 历史超过 max_history 时从头部裁掉最旧的消息。
     fn trim_history(&mut self) {
         if self.messages.len() > self.max_history {
             let excess = self.messages.len() - self.max_history;

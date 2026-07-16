@@ -8,6 +8,7 @@ use crate::tools::schema::{
     ParameterSchema, Tool, ToolContext, ToolResult, ToolSchema, get_string,
 };
 
+/// `subagent_create` 工具：创建子 Agent 并返回其 ID。
 pub struct SubagentCreateTool {
     manager: Arc<SubagentManager>,
 }
@@ -65,6 +66,7 @@ impl Tool for SubagentCreateTool {
     }
 }
 
+/// `subagent_run` 工具：运行已创建的子 Agent 并返回执行结果。
 pub struct SubagentRunTool {
     manager: Arc<SubagentManager>,
 }
@@ -109,6 +111,7 @@ impl Tool for SubagentRunTool {
     }
 }
 
+/// `subagent_list` 工具：列出所有已创建的子 Agent。
 pub struct SubagentListTool {
     manager: Arc<SubagentManager>,
 }
@@ -153,6 +156,7 @@ impl Tool for SubagentListTool {
     }
 }
 
+/// `subagent_delete` 工具：删除已创建的子 Agent。
 pub struct SubagentDeleteTool {
     manager: Arc<SubagentManager>,
 }

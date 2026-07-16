@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::agent::subagent_manager::SubagentManager;
 use crate::tools::schema::{Tool, ToolContext, ToolResult, ToolSchema, get_i64};
 
+/// 解析 agents 参数：接受 JSON 数组或 JSON 数组字符串，逐项提取 name/system_prompt/task/allowed_tools。
 fn parse_agent_specs(args: &HashMap<String, Value>) -> anyhow::Result<Vec<AgentSpec>> {
     let value = args
         .get("agents")
@@ -62,6 +63,7 @@ fn parse_agent_specs(args: &HashMap<String, Value>) -> anyhow::Result<Vec<AgentS
     Ok(specs)
 }
 
+/// 单个子 Agent 的任务规格。
 #[derive(Debug, Clone)]
 struct AgentSpec {
     name: String,
@@ -70,6 +72,7 @@ struct AgentSpec {
     allowed_tools: Vec<String>,
 }
 
+/// `collaborate_parallel` 工具：并行派发多个子 Agent，结果按 name 汇总为 JSON。
 pub struct CollaborateParallelTool {
     manager: Arc<SubagentManager>,
 }
@@ -184,6 +187,7 @@ fn unique_key(map: &serde_json::Map<String, Value>, name: &str) -> String {
     }
 }
 
+/// `collaborate_sequential` 工具：顺序执行多个子 Agent，后者可读取前者输出。
 pub struct CollaborateSequentialTool {
     manager: Arc<SubagentManager>,
 }

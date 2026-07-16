@@ -53,6 +53,7 @@ pub fn markdown_to_text(input: &str) -> Text<'_> {
     Text::from(all_lines)
 }
 
+/// 用 pulldown-cmark 解析 Markdown 事件流，转换为带样式的行列表。
 fn render_markdown(input: &str) -> Text<'_> {
     let mut lines: Vec<Line> = Vec::new();
     let mut current_spans: Vec<Span> = Vec::new();
@@ -107,6 +108,7 @@ fn render_markdown(input: &str) -> Text<'_> {
     Text::from(lines)
 }
 
+/// 标签开始时叠加样式；块级标签开始时先把已累积的行推入结果。
 fn apply_tag_style(style: Style, tag: &Tag) -> Style {
     match tag {
         Tag::Strong | Tag::Heading { .. } => style.add_modifier(Modifier::BOLD),
@@ -118,6 +120,7 @@ fn apply_tag_style(style: Style, tag: &Tag) -> Style {
     }
 }
 
+/// 标签结束时恢复样式（与 apply_tag_style 对应）。
 fn reset_tag_style(style: Style, tag_end: &TagEnd) -> Style {
     match tag_end {
         TagEnd::Strong | TagEnd::Heading(_) => style.remove_modifier(Modifier::BOLD),
@@ -129,6 +132,7 @@ fn reset_tag_style(style: Style, tag_end: &TagEnd) -> Style {
     }
 }
 
+/// 判断是否为块级开始标签（段落、标题、列表、表格等）。
 fn is_block_tag(tag: &Tag) -> bool {
     matches!(
         tag,
@@ -146,6 +150,7 @@ fn is_block_tag(tag: &Tag) -> bool {
     )
 }
 
+/// 判断是否为块级结束标签。
 fn is_block_end(tag_end: &TagEnd) -> bool {
     matches!(
         tag_end,

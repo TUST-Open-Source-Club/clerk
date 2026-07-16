@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// SKILL.md Frontmatter 元数据。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SkillMeta {
     #[serde(default)]
@@ -15,6 +16,7 @@ pub struct SkillMeta {
     pub tools: Vec<String>,
 }
 
+/// 解析后的 Skill：元数据 + 示例对话 + 正文。
 #[derive(Debug, Clone)]
 pub struct Skill {
     pub meta: SkillMeta,
@@ -23,12 +25,14 @@ pub struct Skill {
     pub source_path: Option<std::path::PathBuf>,
 }
 
+/// Skill 示例对话（用户输入 + 助手回复）。
 #[derive(Debug, Clone)]
 pub struct SkillExample {
     pub user: String,
     pub assistant: String,
 }
 
+/// 解析 SKILL.md：分离 YAML Frontmatter 与正文，并提取示例对话。
 pub fn parse(content: &str) -> Result<Skill> {
     let (meta, body) = split_frontmatter(content)?;
     let meta: SkillMeta = if meta.trim().is_empty() {
@@ -47,6 +51,7 @@ pub fn parse(content: &str) -> Result<Skill> {
     })
 }
 
+/// 按 `---` 分隔符拆分 Frontmatter 与正文；无 Frontmatter 时元数据为空。
 fn split_frontmatter(content: &str) -> Result<(&str, &str)> {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
@@ -64,6 +69,7 @@ fn split_frontmatter(content: &str) -> Result<(&str, &str)> {
     }
 }
 
+/// 从正文中提取 `### User:` / `### Assistant:`（支持中文标题）成对示例。
 fn extract_examples(body: &str) -> Vec<SkillExample> {
     let mut examples = Vec::new();
     let mut current_user: Option<String> = None;
@@ -100,6 +106,7 @@ fn extract_examples(body: &str) -> Vec<SkillExample> {
 }
 
 impl Skill {
+    /// 将系统提示词与示例格式化为可注入 prompt 的文本。
     pub fn format_for_prompt(&self) -> String {
         let mut prompt = String::new();
         if !self.meta.system_prompt.is_empty() {
@@ -117,6 +124,7 @@ impl Skill {
         prompt
     }
 
+    /// 按 tags/name/description 与用户输入的匹配程度打分，用于 Skill 相关性排序。
     pub fn score_relevance(&self, input: &str) -> f32 {
         let input_lower = input.to_lowercase();
         let mut score = 0.0f32;

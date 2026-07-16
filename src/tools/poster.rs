@@ -7,6 +7,7 @@ use tokio_stream::StreamExt;
 
 use crate::tools::schema::{Tool, ToolContext, ToolResult, ToolSchema, get_string};
 
+/// `poster` 工具：用无头 Chromium 将 HTML 渲染为指定尺寸的海报 PDF/PNG。
 pub struct PosterTool;
 
 #[async_trait]
@@ -92,6 +93,7 @@ impl Tool for PosterTool {
     }
 }
 
+/// 相对路径基于工作目录解析，绝对路径原样返回。
 fn resolve_path(working_dir: &std::path::Path, input: &str) -> Result<PathBuf> {
     let path = PathBuf::from(input);
     Ok(if path.is_absolute() {
@@ -101,6 +103,7 @@ fn resolve_path(working_dir: &std::path::Path, input: &str) -> Result<PathBuf> {
     })
 }
 
+/// 解析尺寸字符串（支持 mm/cm 后缀，无后缀按 cm）并转换为 cm。
 fn mm_to_cm(value: &str) -> Result<f64> {
     let value = value.trim().to_lowercase();
     if value.ends_with("mm") {

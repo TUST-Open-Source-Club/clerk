@@ -1,6 +1,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 
+/// 命令行参数。
 #[derive(Parser, Debug)]
 #[command(name = "clerk")]
 #[command(about = "Clerk - 终端办公 AI Agent", long_about = None)]
@@ -26,6 +27,7 @@ pub struct Args {
     pub setup: bool,
 }
 
+/// 解析命令行参数。
 pub fn parse() -> Args {
     Args::parse()
 }

@@ -41,6 +41,7 @@ use crate::tools::write_skill::WriteSkillTool;
 use crate::tools::{browser, fs, office, pdf, poster, shell, web};
 use crate::util::expand_tilde;
 
+/// 初始化日志：按 RUST_LOG 环境变量过滤，写入数据目录下的 clerk.log。
 fn setup_logging() -> Result<()> {
     let filter = env::var("RUST_LOG").unwrap_or_else(|_| "clerk=info".to_string());
     let data_dir = Config::default_db_path()?
@@ -63,6 +64,7 @@ fn setup_logging() -> Result<()> {
     Ok(())
 }
 
+/// 创建工具注册表：注册全部本地工具，再基于共享的 SubagentManager 注册子 Agent 与协作工具。
 fn create_tool_registry(
     working_dir: &std::path::Path,
     client: Arc<dyn crate::agent::llm::LlmClient>,
@@ -102,11 +104,13 @@ fn create_tool_registry(
     registry
 }
 
+/// 按配置创建 OpenAI 兼容 LLM 客户端。
 fn create_llm_client(config: &Config) -> Result<Arc<dyn crate::agent::llm::LlmClient>> {
     let client = OpenAiClient::from_config(&config.llm)?;
     Ok(Arc::new(client))
 }
 
+/// 读取一行输入并去掉末尾换行符。
 fn read_line<R: BufRead>(reader: &mut R) -> Result<String> {
     let mut line = String::new();
     reader.read_line(&mut line).context("读取输入失败")?;
@@ -116,6 +120,7 @@ fn read_line<R: BufRead>(reader: &mut R) -> Result<String> {
         .to_string())
 }
 
+/// 首次运行配置向导：交互式收集 LLM 与工作目录配置并保存到指定路径。
 fn run_config_wizard<R: BufRead, W: Write>(
     path: &Path,
     reader: &mut R,
@@ -201,6 +206,7 @@ fn parse_yes_no(line: &str) -> bool {
     matches!(line.trim().to_lowercase().as_str(), "y" | "yes" | "是")
 }
 
+/// 应用主流程：加载/生成配置，初始化存储、LLM 与工具注册表，进入交互或非交互模式。
 async fn run_app() -> Result<()> {
     let args = cli::parse();
 
@@ -273,6 +279,7 @@ async fn run_app() -> Result<()> {
     result
 }
 
+/// 构造系统提示词：说明 Plan-Execute 工作方式与可用工具清单。
 fn build_system_prompt() -> String {
     r#"你是一个 Plan-Execute 办公 Agent，名为 Clerk。你会先为用户请求制定执行计划，然后逐步执行，最后总结结果。
 你可以使用以下工具帮助用户：
@@ -297,6 +304,7 @@ fn build_system_prompt() -> String {
         .to_string()
 }
 
+/// 恢复终端状态：关闭 raw mode、退出备用屏幕并显示光标。
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -304,6 +312,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
     Ok(())
 }
 
+/// 程序入口：初始化日志并运行应用，出错时打印并退出码 1。
 #[tokio::main]
 async fn main() {
     if let Err(e) = setup_logging() {

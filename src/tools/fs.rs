@@ -10,6 +10,7 @@ use crate::tools::schema::{
 };
 use crate::util::expand_tilde;
 
+/// `fs_read` 工具：读取文本文件内容，可用 limit 限制返回行数。
 pub struct ReadFileTool;
 
 #[async_trait]
@@ -50,6 +51,7 @@ impl Tool for ReadFileTool {
     }
 }
 
+/// `fs_write` 工具：写入文本文件（自动创建父目录，已存在则覆盖）。
 pub struct WriteFileTool;
 
 #[async_trait]
@@ -84,6 +86,7 @@ impl Tool for WriteFileTool {
     }
 }
 
+/// `fs_list` 工具：列出目录内容，可选递归。
 pub struct ListDirTool;
 
 #[async_trait]
@@ -117,6 +120,7 @@ impl Tool for ListDirTool {
     }
 }
 
+/// 展开 `~` 并基于工作目录解析相对路径，尽量 canonicalize。
 fn resolve_path(working_dir: &std::path::Path, input: &str) -> Result<PathBuf> {
     let path = expand_tilde(input);
     let resolved = if path.is_absolute() {
@@ -127,6 +131,7 @@ fn resolve_path(working_dir: &std::path::Path, input: &str) -> Result<PathBuf> {
     Ok(resolved.canonicalize().unwrap_or(resolved))
 }
 
+/// 列出目录单层内容，每项标注 (dir)/(file)。
 fn list_dir(path: &std::path::Path) -> Result<Vec<String>> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(path).with_context(|| format!("读取目录失败: {}", path.display()))?
@@ -143,6 +148,7 @@ fn list_dir(path: &std::path::Path) -> Result<Vec<String>> {
     Ok(entries)
 }
 
+/// 递归列出目录内容，路径显示为相对 base 的形式。
 fn list_recursive(base: &std::path::Path, path: &std::path::Path) -> Result<Vec<String>> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(path).with_context(|| format!("读取目录失败: {}", path.display()))?

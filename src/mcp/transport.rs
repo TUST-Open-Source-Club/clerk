@@ -23,6 +23,7 @@ pub struct StdioTransport {
 }
 
 impl StdioTransport {
+    /// 启动子进程并通过其 stdin/stdout 建立 JSON-RPC 通信通道。
     pub async fn spawn(command: &str, args: &[String]) -> Result<Self> {
         let mut cmd = tokio::process::Command::new(command);
         cmd.args(args)
@@ -100,6 +101,7 @@ impl SseTransport {
         }
     }
 
+    /// 建立 SSE 连接（当前为占位实现，仅推导 message endpoint）。
     pub async fn connect(&mut self) -> Result<()> {
         info!("连接 MCP SSE endpoint: {}", self.endpoint);
         // SSE 连接后，server 会通过 event 发送 message endpoint

@@ -19,6 +19,7 @@ use crate::agent::llm::client::{
     ToolCall, ToolDefinition,
 };
 
+/// OpenAI 兼容接口的 LLM 客户端，支持非流式与 SSE 流式聊天。
 pub struct OpenAiClient {
     client: Client<OpenAIConfig>,
     api_key: String,
@@ -29,6 +30,7 @@ pub struct OpenAiClient {
 }
 
 impl OpenAiClient {
+    /// 创建客户端；超时下限为 5 秒。
     pub fn new(
         base_url: impl Into<String>,
         api_key: impl Into<String>,
@@ -52,6 +54,7 @@ impl OpenAiClient {
         })
     }
 
+    /// 从 LlmConfig 构造客户端。
     pub fn from_config(config: &crate::config::LlmConfig) -> Result<Self> {
         Self::new(
             config.base_url.clone(),
@@ -62,6 +65,7 @@ impl OpenAiClient {
         )
     }
 
+    /// 将内部消息转换为 async-openai 请求消息（含工具调用与工具结果）。
     fn convert_message(msg: Message) -> ChatCompletionRequestMessage {
         match msg.role {
             ClerkRole::System => ChatCompletionRequestSystemMessage {
@@ -116,6 +120,7 @@ impl OpenAiClient {
         }
     }
 
+    /// 将内部工具定义转换为 async-openai 工具格式。
     fn convert_tool(tool: ToolDefinition) -> ChatCompletionTool {
         ChatCompletionTool {
             r#type: ChatCompletionToolType::Function,
@@ -128,6 +133,7 @@ impl OpenAiClient {
         }
     }
 
+    /// 从响应 choice 中提取文本或工具调用。
     fn extract_response(choice: async_openai::types::ChatChoice) -> LlmResponse {
         if let Some(calls) = choice.message.tool_calls
             && !calls.is_empty()
@@ -153,6 +159,7 @@ impl OpenAiClient {
 
 #[async_trait]
 impl LlmClient for OpenAiClient {
+    /// 非流式聊天：调用 chat/completions，带超时控制；未配置 API key 时返回提示文本。
     async fn chat(
         &self,
         messages: Vec<Message>,
@@ -202,6 +209,8 @@ impl LlmClient for OpenAiClient {
         Ok(Self::extract_response(choice))
     }
 
+    /// SSE 流式聊天：后台任务解析 data: 行，分离推理内容（reasoning_content）与正式内容；
+    /// 流中出现工具调用时先回传已缓冲内容，再以错误结束，由调用方回退为非流式。
     async fn chat_stream(
         &self,
         messages: Vec<Message>,
@@ -295,6 +304,7 @@ impl LlmClient for OpenAiClient {
                         break;
                     }
                 };
+                // TCP 分片可能切断 SSE 行，先累积到行缓冲再逐行取出
                 let text = String::from_utf8_lossy(&chunk);
                 line_buffer.push_str(&text);
 
@@ -332,6 +342,7 @@ impl LlmClient for OpenAiClient {
                             && !calls.is_empty()
                         {
                             if !content_buffer.is_empty() || !reasoning_buffer.is_empty() {
+                                // 先冲刷已缓冲文本，再以错误终止流，让调用方回退为非流式
                                 let _ = tx.send(Ok(StreamChunk {
                                     content: Some(std::mem::take(&mut content_buffer))
                                         .filter(|s| !s.is_empty()),
@@ -352,6 +363,7 @@ impl LlmClient for OpenAiClient {
                             content_buffer.push_str(content);
                         }
 
+                        // 推理与正式内容同时存在时先单独发推理块，正式内容随后统一冲刷
                         if !content_buffer.is_empty() && !reasoning_buffer.is_empty() {
                             let _ = tx.send(Ok(StreamChunk {
                                 content: None,
@@ -360,6 +372,7 @@ impl LlmClient for OpenAiClient {
                         }
                     }
 
+                    // 每个 SSE 事件处理完后统一冲刷缓冲区
                     if !content_buffer.is_empty() || !reasoning_buffer.is_empty() {
                         let _ = tx.send(Ok(StreamChunk {
                             content: Some(std::mem::take(&mut content_buffer))

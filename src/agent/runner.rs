@@ -354,11 +354,13 @@ impl PlanExecuteRunner {
         Ok(text)
     }
 
+    /// 从注册表收集当前可用的工具定义。
     async fn tool_definitions(&self) -> Vec<crate::agent::llm::ToolDefinition> {
         let registry = self.registry.lock().await;
         registry.tool_definitions()
     }
 
+    /// 解析工具参数 JSON、发送事件、等待审批（如需要），最后执行工具并返回结果字符串。
     async fn execute_tool_call(
         &self,
         tool_call: &crate::agent::llm::ToolCall,
@@ -538,6 +540,7 @@ fn strip_step_marker(line: &str) -> Option<String> {
     None
 }
 
+/// 将步骤列表格式化为编号文本（"1. xxx\n2. yyy"）。
 fn format_steps(steps: &[String]) -> String {
     steps
         .iter()

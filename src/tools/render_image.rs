@@ -8,6 +8,7 @@ use tokio_stream::StreamExt;
 use crate::tools::schema::{Tool, ToolContext, ToolResult, ToolSchema, get_i64, get_string};
 use crate::util::expand_tilde;
 
+/// `render_to_image` 工具：按扩展名将 HTML/PDF/Office/图片渲染或转换为 PNG 预览图。
 pub struct RenderToImage;
 
 #[async_trait]
@@ -82,6 +83,7 @@ impl Tool for RenderToImage {
     }
 }
 
+/// 展开 `~` 后，相对路径基于工作目录解析，绝对路径原样返回。
 fn resolve_path(working_dir: &Path, input: &str) -> Result<PathBuf> {
     let path = expand_tilde(input);
     Ok(if path.is_absolute() {
@@ -91,6 +93,7 @@ fn resolve_path(working_dir: &Path, input: &str) -> Result<PathBuf> {
     })
 }
 
+/// 生成默认输出路径：`<工作目录>/<输入文件名>.preview.png`。
 fn default_output_path(working_dir: &Path, input_path: &Path) -> PathBuf {
     let name = input_path
         .file_name()
@@ -99,6 +102,7 @@ fn default_output_path(working_dir: &Path, input_path: &Path) -> PathBuf {
     working_dir.join(format!("{}.preview.png", name))
 }
 
+/// 检查命令是否存在于 PATH 中。
 async fn command_exists(cmd: &str) -> bool {
     tokio::process::Command::new(cmd)
         .arg("--version")
@@ -108,6 +112,7 @@ async fn command_exists(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 用无头 Chromium 打开 HTML 文件并截图保存为 PNG，可指定视口宽高。
 async fn render_html_to_png(input: &Path, output: &Path, width: i64, height: i64) -> Result<()> {
     let mut config_builder = chromiumoxide::browser::BrowserConfig::builder()
         .headless_mode(chromiumoxide::browser::HeadlessMode::True);
@@ -163,6 +168,7 @@ async fn render_html_to_png(input: &Path, output: &Path, width: i64, height: i64
     Ok(())
 }
 
+/// 将 PDF 首页转为 PNG：优先 pdftoppm，其次 mutool。
 async fn convert_pdf_to_png(input: &Path, output: &Path) -> Result<()> {
     if command_exists("pdftoppm").await {
         let prefix = output.with_extension("");
@@ -226,6 +232,7 @@ async fn convert_pdf_to_png(input: &Path, output: &Path) -> Result<()> {
     anyhow::bail!("{}", pdf_tool_missing_hint());
 }
 
+/// 未检测到 PDF 转图片工具时的安装提示。
 fn pdf_tool_missing_hint() -> String {
     "未检测到 PDF 转图片工具。请安装以下任一工具：\n\
     - pdftoppm: sudo apt install poppler-utils / brew install poppler\n\
@@ -233,6 +240,7 @@ fn pdf_tool_missing_hint() -> String {
         .to_string()
 }
 
+/// 将 Office 文档（docx/xlsx/pptx）先经 LibreOffice 转 PDF，再转 PNG。
 async fn convert_office_to_png(input: &Path, output: &Path) -> Result<()> {
     if !command_exists("libreoffice").await {
         anyhow::bail!("{}", office_tool_missing_hint());
@@ -269,6 +277,7 @@ async fn convert_office_to_png(input: &Path, output: &Path) -> Result<()> {
     convert_pdf_to_png(&pdf_path, output).await
 }
 
+/// 未检测到 LibreOffice 时的安装提示。
 fn office_tool_missing_hint() -> String {
     "未检测到 LibreOffice。请安装以渲染 Office 文件：\n\
     - Ubuntu/Debian: sudo apt install libreoffice\n\

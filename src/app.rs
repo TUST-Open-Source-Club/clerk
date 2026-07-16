@@ -30,6 +30,7 @@ use crate::tools::registry::ToolRegistry;
 use crate::ui::chat::ChatPanel;
 use crate::ui::input::InputArea;
 
+/// 应用状态：空闲 / 正在流式生成 / 出错。
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppStatus {
     Idle,
@@ -37,6 +38,7 @@ pub enum AppStatus {
     Error(String),
 }
 
+/// TUI 应用：持有会话状态、UI 组件、Agent runner 与流式/审批通道。
 pub struct App {
     pub session_id: String,
     pub chat: ChatPanel,
@@ -69,6 +71,7 @@ pub struct PendingApproval {
     respond: tokio::sync::oneshot::Sender<bool>,
 }
 
+/// 流式任务发往 UI 的事件：输出块、工具事件、审批请求与完成信号。
 #[derive(Debug)]
 enum StreamEvent {
     Chunk(StreamChunk),
@@ -82,6 +85,7 @@ enum StreamEvent {
 }
 
 impl App {
+    /// 创建新会话的 App：在 Store 中建会话，初始化 UI 组件与 PlanExecuteRunner。
     pub async fn new(
         store: Store,
         client: Arc<dyn LlmClient>,
@@ -126,6 +130,7 @@ impl App {
         })
     }
 
+    /// 加载已有会话的 App：会话不存在时自动创建，恢复历史消息。
     pub async fn load_session(
         store: Store,
         session_id: &str,
@@ -172,6 +177,7 @@ impl App {
         })
     }
 
+    /// 主事件循环：绘制界面，分发键盘事件与流式事件，驱动加载动画。
     pub async fn run<B: Backend>(mut self, terminal: &mut Terminal<B>) -> Result<()> {
         let mut reader = EventStream::new();
         let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -206,6 +212,7 @@ impl App {
         Ok(())
     }
 
+    /// 处理键盘事件：审批模式下只响应 y/n；否则处理发送、编辑、滚动与命令。
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         if key.kind != KeyEventKind::Press {
             return Ok(());
@@ -310,6 +317,8 @@ impl App {
         }
     }
 
+    /// 检测输入是否为单个本地媒体文件路径（粘贴图片/视频场景）：
+    /// 是且模型支持时转为附件并直接发送，返回 true。
     async fn try_handle_pasted_media_path(&mut self) -> Result<bool> {
         let text = self.input.text();
         let trimmed = text.trim();
@@ -343,6 +352,7 @@ impl App {
         Ok(true)
     }
 
+    /// 处理斜杠命令（/help、/exit、/yolo、/sessions、/attach 等）。
     async fn handle_command(&mut self) -> Result<()> {
         let text = self.input.text();
         self.input.clear();
@@ -447,6 +457,7 @@ impl App {
         Ok(())
     }
 
+    /// 添加附件：校验文件存在、类型为图片/视频，并对未启用对应多模态能力的模型给出提示。
     async fn attach_file(&mut self, arg: &str) -> Result<()> {
         let path = self.resolve_relative_path(arg);
         if !path.exists() {
@@ -485,6 +496,7 @@ impl App {
         Ok(())
     }
 
+    /// 将用户输入的路径解析为绝对路径（相对路径基于工作目录）。
     fn resolve_relative_path(&self, input: &str) -> PathBuf {
         let path = PathBuf::from(input);
         if path.is_absolute() {
@@ -494,6 +506,8 @@ impl App {
         }
     }
 
+    /// 发送用户消息：拼接附件描述、持久化，然后启动流式 runner 任务，
+    /// 并把输出块/工具事件/审批请求统一桥接到 UI 的 StreamEvent 通道。
     async fn send_message(&mut self) -> Result<()> {
         let mut text = self.input.text().trim().to_string();
         if text.is_empty() {
@@ -578,6 +592,8 @@ impl App {
         Ok(())
     }
 
+    /// 处理流式事件：累积输出块（推理内容包入 <think>）、记录工具事件、
+    /// 进入审批模式，或在完成时落库最终回复并复位状态。
     async fn handle_stream_event(&mut self, event: StreamEvent) -> Result<()> {
         match event {
             StreamEvent::Chunk(chunk) => {
@@ -682,6 +698,7 @@ impl App {
         }
     }
 
+    /// 绘制界面：上为聊天区，中为输入区（并定位光标），下为状态栏。
     fn draw(&self, frame: &mut Frame) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -731,6 +748,7 @@ fn spinner_char(frame: usize) -> char {
     FRAMES[frame % FRAMES.len()]
 }
 
+/// 将 runner 工具事件格式化为聊天面板展示文本。
 fn format_tool_event(event: &RunnerEvent) -> String {
     match event {
         RunnerEvent::Plan { steps } => {
@@ -759,6 +777,7 @@ fn format_tool_event(event: &RunnerEvent) -> String {
     }
 }
 
+/// 将工具参数 JSON 格式化为 `k=v` 列表，供审批与事件展示。
 fn format_tool_arguments(name: &str, arguments: &Value) -> String {
     match arguments.as_object() {
         Some(map) => {
@@ -776,6 +795,7 @@ fn format_tool_arguments(name: &str, arguments: &Value) -> String {
     }
 }
 
+/// 格式化单个参数值；shell 命令、文件内容等长字段超过 120 字符时截断展示。
 fn format_arg_value(tool_name: &str, key: &str, value: &serde_json::Value) -> String {
     // shell 命令、文件内容等长字段需要截断
     let is_long_field = matches!(
@@ -796,6 +816,7 @@ fn format_arg_value(tool_name: &str, key: &str, value: &serde_json::Value) -> St
     }
 }
 
+/// 判断文件是图片还是视频（infer 检测 MIME，失败时按扩展名回退）。
 fn media_kind(path: &Path) -> Option<&'static str> {
     let mime = infer::get_from_path(path)
         .ok()
@@ -818,6 +839,7 @@ fn media_kind(path: &Path) -> Option<&'static str> {
     }
 }
 
+/// 构造系统提示词：说明 Plan-Execute 工作方式与可用工具清单。
 fn build_system_prompt() -> String {
     r#"你是一个 Plan-Execute 办公 Agent，名为 Clerk。你会先为用户请求制定执行计划，然后逐步执行，最后总结结果。
 你可以使用以下工具帮助用户：
@@ -842,6 +864,7 @@ fn build_system_prompt() -> String {
         .to_string()
 }
 
+/// 构造一条仅用于 UI 展示的系统消息（不落库，id 为 0）。
 fn system_message(session_id: &str, content: &str) -> Message {
     Message {
         id: 0,

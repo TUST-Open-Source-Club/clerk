@@ -12,6 +12,7 @@ pub struct StreamChunk {
 pub type ChatStream =
     Box<dyn tokio_stream::Stream<Item = anyhow::Result<StreamChunk>> + Send + Unpin>;
 
+/// 消息角色：系统、用户、助手或工具结果。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -32,6 +33,7 @@ impl std::fmt::Display for Role {
     }
 }
 
+/// 对话消息：角色 + 文本内容，可选携带工具调用或工具调用 ID。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
@@ -80,6 +82,7 @@ impl Message {
     }
 }
 
+/// 一次工具调用记录（OpenAI 格式）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
@@ -88,12 +91,14 @@ pub struct ToolCall {
     pub function: FunctionCall,
 }
 
+/// 函数调用：名称 + JSON 字符串参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionCall {
     pub name: String,
     pub arguments: String,
 }
 
+/// 提供给 LLM 的工具定义（type = function）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ToolDefinition {
     #[serde(rename = "type")]
@@ -101,6 +106,7 @@ pub struct ToolDefinition {
     pub function: FunctionDefinition,
 }
 
+/// 工具函数的元数据：名称、描述与参数 JSON Schema。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FunctionDefinition {
     pub name: String,
@@ -108,6 +114,7 @@ pub struct FunctionDefinition {
     pub parameters: serde_json::Value,
 }
 
+/// Chat Completion 请求体。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatCompletionRequest {
     pub model: String,
@@ -120,6 +127,7 @@ pub struct ChatCompletionRequest {
     pub temperature: Option<f32>,
 }
 
+/// Chat Completion 响应体。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatCompletionResponse {
     pub id: String,
@@ -130,6 +138,7 @@ pub struct ChatCompletionResponse {
     pub usage: Option<Usage>,
 }
 
+/// 响应中的一个候选消息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Choice {
     pub index: i32,
@@ -137,6 +146,7 @@ pub struct Choice {
     pub finish_reason: Option<String>,
 }
 
+/// token 用量统计。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Usage {
     pub prompt_tokens: i32,

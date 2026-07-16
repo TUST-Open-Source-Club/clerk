@@ -26,6 +26,7 @@ pub struct Subagent {
 }
 
 impl Subagent {
+    /// 创建子 Agent：指定身份、系统提示词、工具白名单及共享的 LLM 客户端与工具注册表。
     pub fn new(
         id: impl Into<String>,
         name: impl Into<String>,

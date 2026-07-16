@@ -15,6 +15,7 @@ pub struct ParameterSchema {
 }
 
 impl ParameterSchema {
+    /// 构造 string 类型参数。
     pub fn string(description: impl Into<String>) -> Self {
         Self {
             param_type: "string".to_string(),
@@ -24,6 +25,7 @@ impl ParameterSchema {
         }
     }
 
+    /// 构造 integer 类型参数。
     pub fn integer(description: impl Into<String>) -> Self {
         Self {
             param_type: "integer".to_string(),
@@ -33,6 +35,7 @@ impl ParameterSchema {
         }
     }
 
+    /// 构造 boolean 类型参数。
     pub fn boolean(description: impl Into<String>) -> Self {
         Self {
             param_type: "boolean".to_string(),
@@ -42,6 +45,7 @@ impl ParameterSchema {
         }
     }
 
+    /// 构造 array 类型参数，`items` 描述元素类型。
     pub fn array(items: ParameterSchema, description: impl Into<String>) -> Self {
         Self {
             param_type: "array".to_string(),
@@ -61,6 +65,7 @@ pub struct ToolSchema {
 }
 
 impl ToolSchema {
+    /// 创建空参数表的 schema。
     pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -180,12 +185,16 @@ impl std::fmt::Display for ToolResult {
     }
 }
 
-/// 工具 trait
+/// 工具 trait：所有本地工具与 MCP 工具的统一抽象。
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
+    /// 工具名称（唯一标识）。
     fn name(&self) -> &str;
+    /// 给模型看的工具功能描述。
     fn description(&self) -> &str;
+    /// 工具参数的 JSON Schema。
     fn schema(&self) -> ToolSchema;
+    /// 执行工具并返回结果。
     async fn execute(
         &self,
         args: HashMap<String, Value>,

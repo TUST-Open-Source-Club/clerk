@@ -6,6 +6,7 @@ use tokio::process::Command;
 
 use crate::tools::schema::{Tool, ToolContext, ToolResult, ToolSchema, get_string};
 
+/// `shell` 工具：在指定工作目录下通过 `sh -c` 执行命令，返回 stdout/stderr。
 pub struct ShellTool;
 
 #[async_trait]

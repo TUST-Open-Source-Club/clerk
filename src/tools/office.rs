@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use crate::tools::schema::{Tool, ToolContext, ToolResult, ToolSchema, get_string};
 
+/// `office_read_excel` 工具：读取 Excel 指定 sheet，返回 JSON 行数据。
 pub struct ReadExcelTool;
 
 #[async_trait]
@@ -71,6 +72,7 @@ impl Tool for ReadExcelTool {
     }
 }
 
+/// `office_write_excel` 工具：将二维 JSON 数组写入 Excel 文件。
 pub struct WriteExcelTool;
 
 #[async_trait]
@@ -128,6 +130,7 @@ impl Tool for WriteExcelTool {
     }
 }
 
+/// `office_read_word` 工具：提取 Word 文档的纯文本内容。
 pub struct ReadWordTool;
 
 #[async_trait]
@@ -173,6 +176,7 @@ impl Tool for ReadWordTool {
     }
 }
 
+/// `office_write_word` 工具：将文本按行写入 Word 文档段落。
 pub struct WriteWordTool;
 
 #[async_trait]
@@ -209,6 +213,7 @@ impl Tool for WriteWordTool {
     }
 }
 
+/// 相对路径基于工作目录解析，绝对路径原样返回。
 fn resolve_path(working_dir: &std::path::Path, input: &str) -> Result<PathBuf> {
     let path = PathBuf::from(input);
     Ok(if path.is_absolute() {
@@ -218,6 +223,7 @@ fn resolve_path(working_dir: &std::path::Path, input: &str) -> Result<PathBuf> {
     })
 }
 
+/// `office_render` 工具：调用 Pandoc 将 Markdown/HTML 渲染为 Word/PDF/PPT。
 pub struct RenderOfficeTool;
 
 #[async_trait]

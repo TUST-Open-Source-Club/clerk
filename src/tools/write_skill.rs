@@ -5,6 +5,7 @@ use serde_json::Value;
 use crate::skills::writer::SkillWriter;
 use crate::tools::schema::{Tool, ToolContext, ToolResult, ToolSchema, get_string};
 
+/// `write_skill` 工具：把 SKILL.md 内容写入项目 skills 目录以便复用。
 pub struct WriteSkillTool;
 
 impl WriteSkillTool {

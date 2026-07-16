@@ -10,9 +10,12 @@ use crate::util::expand_tilde;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use uuid::Uuid;
 
+/// 超过该大小的图片会先压缩再内联为 base64
 const MAX_INLINE_SIZE: u64 = 2 * 1024 * 1024;
+/// 压缩后图片的最大边长（像素）
 const MAX_INLINE_DIMENSION: u32 = 1024;
 
+/// `read_media_file` 工具：读取图片/视频，返回元信息与 base64 数据 URL。
 pub struct ReadMediaFile;
 
 #[async_trait]
@@ -67,6 +70,7 @@ pub async fn read_media_file(path: &Path) -> Result<String> {
     }
 }
 
+/// 展开 `~` 后，相对路径基于工作目录解析，绝对路径原样返回。
 fn resolve_path(working_dir: &Path, input: &str) -> Result<PathBuf> {
     let path = expand_tilde(input);
     Ok(if path.is_absolute() {
@@ -76,6 +80,7 @@ fn resolve_path(working_dir: &Path, input: &str) -> Result<PathBuf> {
     })
 }
 
+/// 按扩展名猜测 MIME 类型，作为 infer 检测失败时的回退。
 fn guess_kind_from_extension(path: &Path) -> Option<String> {
     let ext = path.extension().and_then(|e| e.to_str())?.to_lowercase();
     match ext.as_str() {
@@ -93,6 +98,7 @@ fn guess_kind_from_extension(path: &Path) -> Option<String> {
     }
 }
 
+/// 生成图片描述：格式、尺寸与 base64 数据 URL；超过大小上限时先压缩再编码为 PNG。
 async fn describe_image(path: &Path) -> Result<String> {
     let bytes = tokio::fs::read(path)
         .await
@@ -124,6 +130,7 @@ async fn describe_image(path: &Path) -> Result<String> {
     ))
 }
 
+/// 等比缩小图片，使最长边不超过 MAX_INLINE_DIMENSION。
 fn resize_image(img: image::DynamicImage) -> image::DynamicImage {
     let (w, h) = (img.width(), img.height());
     let ratio = f64::from(MAX_INLINE_DIMENSION) / f64::from(w.max(h));
@@ -135,6 +142,7 @@ fn resize_image(img: image::DynamicImage) -> image::DynamicImage {
     img.resize(new_w, new_h, image::imageops::FilterType::Lanczos3)
 }
 
+/// 生成视频描述：用 ffmpeg 提取元信息，并抽取第 1 秒首帧作为 base64 预览图。
 async fn describe_video(path: &Path) -> Result<String> {
     if !command_exists("ffmpeg").await {
         return Ok(
@@ -179,6 +187,7 @@ async fn describe_video(path: &Path) -> Result<String> {
     ))
 }
 
+/// 检查命令是否存在于 PATH 中。
 async fn command_exists(cmd: &str) -> bool {
     tokio::process::Command::new(cmd)
         .arg("--version")

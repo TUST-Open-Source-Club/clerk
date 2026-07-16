@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use crate::tools::schema::{Tool, ToolContext, ToolResult, ToolSchema, get_string};
 
+/// `pdf_merge` 工具：合并多个 PDF，底层依次尝试 pdftk / qpdf / python3+pypdf。
 pub struct MergePdfTool;
 
 #[async_trait]
@@ -84,6 +85,7 @@ impl Tool for MergePdfTool {
     }
 }
 
+/// `pdf_split` 工具：按页码范围拆分 PDF，底层依次尝试 pdftk / qpdf / python3+pypdf。
 pub struct SplitPdfTool;
 
 #[async_trait]
@@ -161,6 +163,7 @@ impl Tool for SplitPdfTool {
     }
 }
 
+/// 探测可用的 PDF 命令行工具：优先 pdftk/qpdf，其次 python3+pypdf。
 async fn find_pdf_tool() -> Result<Option<String>> {
     for tool in [&"pdftk", &"qpdf"] {
         if command_exists(tool).await {
@@ -182,6 +185,7 @@ async fn find_pdf_tool() -> Result<Option<String>> {
     Ok(None)
 }
 
+/// 检查命令是否存在于 PATH 中。
 async fn command_exists(cmd: &str) -> bool {
     tokio::process::Command::new(cmd)
         .arg("--version")
@@ -191,6 +195,7 @@ async fn command_exists(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 执行外部 PDF 命令，非零退出码时把 stderr 包装为错误。
 async fn run_command(mut cmd: tokio::process::Command) -> Result<()> {
     let output = cmd.output().await.context("执行 PDF 工具失败")?;
     if !output.status.success() {
@@ -200,6 +205,7 @@ async fn run_command(mut cmd: tokio::process::Command) -> Result<()> {
     Ok(())
 }
 
+/// 未检测到 PDF 工具时的安装提示。
 fn pdf_tool_missing_hint() -> String {
     "未检测到 PDF 处理工具。请安装以下任一工具：\n\
     - pdftk: sudo apt install pdftk / brew install pdftk-java\n\
@@ -208,6 +214,7 @@ fn pdf_tool_missing_hint() -> String {
         .to_string()
 }
 
+/// 相对路径基于工作目录解析，绝对路径原样返回。
 fn resolve_path(working_dir: &std::path::Path, input: &str) -> Result<PathBuf> {
     let path = PathBuf::from(input);
     Ok(if path.is_absolute() {
@@ -217,6 +224,7 @@ fn resolve_path(working_dir: &std::path::Path, input: &str) -> Result<PathBuf> {
     })
 }
 
+/// 生成用 pypdf 合并多个 PDF 的 python3 -c 脚本。
 fn generate_pypdf_merge_script(files: &[PathBuf], output: &std::path::Path) -> String {
     let imports = "from pypdf import PdfWriter; w=PdfWriter()";
     let mut body = String::new();

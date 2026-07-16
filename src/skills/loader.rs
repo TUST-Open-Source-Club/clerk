@@ -5,6 +5,7 @@ use tracing::{info, warn};
 
 use crate::skills::parser::{Skill, parse};
 
+/// Skill 加载器：从内置/用户/项目三级目录加载 SKILL.md，并支持项目根目录的 AGENTS.md。
 pub struct SkillLoader;
 
 impl SkillLoader {
@@ -34,6 +35,7 @@ impl SkillLoader {
         Ok(skills)
     }
 
+    /// 加载单个目录下的所有 SKILL.md（支持 `dir/SKILL.md` 与 `dir/<name>/SKILL.md` 两种布局）。
     pub fn load_from_dir(dir: &Path, skills: &mut Vec<Skill>) -> Result<()> {
         if !dir.exists() {
             return Ok(());
@@ -62,6 +64,7 @@ impl SkillLoader {
         Ok(())
     }
 
+    /// 加载并解析单个 SKILL.md 文件，记录来源路径。
     pub fn load_file(path: &Path) -> Result<Skill> {
         info!("加载 Skill: {}", path.display());
         let content = fs::read_to_string(path)?;
@@ -70,6 +73,7 @@ impl SkillLoader {
         Ok(skill)
     }
 
+    /// 加载项目根目录（skills 目录的父目录）下的 AGENTS.md，作为名为 project 的 Skill。
     fn load_agents_md(project_dir: &Path) -> Option<Skill> {
         let path = project_dir.parent()?.join("AGENTS.md");
         if !path.exists() {

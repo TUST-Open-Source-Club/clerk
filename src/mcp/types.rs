@@ -31,6 +31,7 @@ pub struct JsonRpcResponse {
     pub result: JsonRpcResult,
 }
 
+/// JSON-RPC 响应结果：成功（result）或错误（error）二选一。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum JsonRpcResult {
@@ -38,6 +39,7 @@ pub enum JsonRpcResult {
     Error { error: JsonRpcError },
 }
 
+/// JSON-RPC 错误对象。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcError {
     pub code: i32,
@@ -54,6 +56,7 @@ pub struct InitializeParams {
     pub client_info: ImplementationInfo,
 }
 
+/// 客户端能力声明。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClientCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -62,11 +65,13 @@ pub struct ClientCapabilities {
     pub sampling: Option<Value>,
 }
 
+/// roots 能力声明。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RootsCapability {
     pub list_changed: bool,
 }
 
+/// 实现方信息（客户端或服务端的名称与版本）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImplementationInfo {
     pub name: String,
@@ -81,12 +86,14 @@ pub struct InitializeResult {
     pub server_info: ImplementationInfo,
 }
 
+/// 服务端能力声明。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ServerCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<ToolsCapability>,
 }
 
+/// 工具能力声明。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsCapability {
     pub list_changed: bool,
@@ -117,6 +124,7 @@ pub struct CallToolResult {
     pub is_error: Option<bool>,
 }
 
+/// 工具结果内容项（当前仅文本）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolContent {
     #[serde(rename = "type")]

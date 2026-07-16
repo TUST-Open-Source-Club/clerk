@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use crate::tools::schema::{Tool, ToolContext, ToolResult, ToolSchema, get_bool, get_string};
 
+/// `web_fetch` 工具：HTTP GET 抓取网页，可选转 Markdown 并按字符数截断。
 pub struct WebFetchTool;
 
 #[async_trait]
@@ -65,6 +66,7 @@ impl Tool for WebFetchTool {
     }
 }
 
+/// `web_post` 工具：以 JSON 请求体发送 HTTP POST。
 pub struct WebPostTool;
 
 #[async_trait]

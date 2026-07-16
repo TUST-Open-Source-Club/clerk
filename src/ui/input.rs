@@ -8,6 +8,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+/// 输入框已知的斜杠命令，用于 Tab 补全与命令提示。
 const KNOWN_COMMANDS: &[&str] = &[
     "/help",
     "/exit",
@@ -19,6 +20,7 @@ const KNOWN_COMMANDS: &[&str] = &[
     "/clear_attachments",
 ];
 
+/// 多行输入框：以 grapheme 为单位维护光标，支持中文等宽字符与斜杠命令补全。
 #[derive(Debug, Clone)]
 pub struct InputArea {
     lines: Vec<String>,
@@ -245,10 +247,12 @@ impl Widget for &InputArea {
     }
 }
 
+/// 字符串的 grapheme（用户感知字符）数量。
 fn grapheme_count(s: &str) -> usize {
     s.graphemes(true).count()
 }
 
+/// 第 N 个 grapheme 对应的字节偏移；越界时返回字符串长度。
 fn byte_index_from_grapheme(s: &str, grapheme_idx: usize) -> usize {
     s.grapheme_indices(true)
         .nth(grapheme_idx)
@@ -256,6 +260,7 @@ fn byte_index_from_grapheme(s: &str, grapheme_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+/// 字节偏移之前一个 grapheme 边界。
 fn prev_grapheme_boundary(s: &str, byte_idx: usize) -> usize {
     s.grapheme_indices(true)
         .take_while(|(idx, _)| *idx < byte_idx)
@@ -264,6 +269,7 @@ fn prev_grapheme_boundary(s: &str, byte_idx: usize) -> usize {
         .unwrap_or(0)
 }
 
+/// 字节偏移之后一个 grapheme 边界；越界时返回字符串长度。
 fn next_grapheme_boundary(s: &str, byte_idx: usize) -> usize {
     s.grapheme_indices(true)
         .find(|(idx, _)| *idx > byte_idx)
@@ -271,6 +277,7 @@ fn next_grapheme_boundary(s: &str, byte_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+/// 按显示宽度将每行软换行为多行（考虑 grapheme 宽度）。
 fn wrap_lines(lines: &[String], width: usize) -> Vec<String> {
     let mut result = Vec::new();
     for line in lines {
@@ -297,6 +304,7 @@ fn wrap_lines(lines: &[String], width: usize) -> Vec<String> {
     result
 }
 
+/// 计算单行按显示宽度软换行后的行数。
 fn wrapped_line_count(s: &str, width: usize) -> usize {
     if s.is_empty() {
         return 1;
@@ -317,6 +325,7 @@ fn wrapped_line_count(s: &str, width: usize) -> usize {
     count
 }
 
+/// 计算一组字符串的最长公共前缀。
 fn longest_common_prefix(strs: &[&str]) -> String {
     if strs.is_empty() {
         return String::new();

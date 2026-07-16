@@ -21,6 +21,7 @@ fn default_timeout_seconds() -> u64 {
     600
 }
 
+/// LLM 配置：OpenAI 兼容接口的模型、地址、密钥与采样参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
     #[serde(default = "default_model")]
@@ -46,6 +47,7 @@ impl Default for LlmConfig {
     }
 }
 
+/// TUI 界面配置。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TuiConfig {
     #[serde(default)]
@@ -54,12 +56,14 @@ pub struct TuiConfig {
     pub show_sidebar: bool,
 }
 
+/// 存储配置：SQLite 数据库路径（可选，缺省用平台数据目录）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StorageConfig {
     #[serde(default)]
     pub db_path: Option<PathBuf>,
 }
 
+/// 多模态能力配置：声明模型是否支持图片/视频输入。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MultimodalConfig {
     #[serde(default)]
@@ -102,6 +106,7 @@ impl PermissionConfig {
     }
 }
 
+/// Clerk 顶层配置，对应 config.toml。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
@@ -120,6 +125,7 @@ pub struct Config {
 }
 
 impl Config {
+    /// 加载配置文件；路径缺省用 `~/.config/clerk/config.toml`，文件不存在时返回默认配置。
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let config_path = match path {
             Some(p) => p.to_path_buf(),
@@ -139,6 +145,7 @@ impl Config {
         Ok(config)
     }
 
+    /// 返回默认配置路径（不存在则创建目录）。
     pub fn default_config_path() -> Result<PathBuf> {
         let dirs =
             ProjectDirs::from("com", "mikesolar", "clerk").context("无法确定项目配置目录")?;
@@ -148,6 +155,7 @@ impl Config {
         Ok(config_dir.join("config.toml"))
     }
 
+    /// 将配置以 TOML 写入指定路径（缺省为默认配置路径）。
     pub fn save(&self, path: Option<&Path>) -> Result<()> {
         let config_path = match path {
             Some(p) => p.to_path_buf(),
@@ -165,6 +173,7 @@ impl Config {
         Ok(())
     }
 
+    /// 返回默认数据库路径（不存在则创建目录）。
     pub fn default_db_path() -> Result<PathBuf> {
         let dirs =
             ProjectDirs::from("com", "mikesolar", "clerk").context("无法确定项目数据目录")?;
@@ -174,6 +183,7 @@ impl Config {
         Ok(data_dir.join("clerk.db"))
     }
 
+    /// 校验配置；API key 为空时仅警告（本地功能仍可用）。
     pub fn validate(&self) -> Result<()> {
         if self.llm.api_key.is_empty() {
             warn!("LLM API key 未配置，运行时可能无法调用模型");
@@ -182,6 +192,7 @@ impl Config {
     }
 }
 
+/// 生成示例配置文本（与 config.example.toml 内容一致）。
 pub fn generate_example_config() -> String {
     r#"# Clerk 配置文件
 

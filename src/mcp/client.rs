@@ -8,12 +8,14 @@ use crate::mcp::types::{
     InitializeResult, JsonRpcRequest, JsonRpcResponse, McpTool,
 };
 
+/// MCP 客户端：基于 JSON-RPC 与 MCP server 通信，负责 initialize 握手与 tools 调用。
 pub struct McpClient {
     transport: Box<dyn Transport>,
     next_id: AtomicU64,
 }
 
 impl McpClient {
+    /// 基于指定传输层创建客户端。
     pub fn new(transport: Box<dyn Transport>) -> Self {
         Self {
             transport,
@@ -21,6 +23,7 @@ impl McpClient {
         }
     }
 
+    /// 通过 stdio 启动 MCP server 子进程并完成 initialize 握手。
     pub async fn connect_stdio(command: &str, args: &[String]) -> Result<Self> {
         let transport = StdioTransport::spawn(command, args).await?;
         let mut client = Self::new(Box::new(transport));
@@ -32,6 +35,7 @@ impl McpClient {
         self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// MCP initialize 握手：声明协议版本与客户端信息。
     pub async fn initialize(&mut self) -> Result<InitializeResult> {
         let params = InitializeParams {
             protocol_version: "2024-11-05".to_string(),
@@ -58,6 +62,7 @@ impl McpClient {
         Ok(init_result)
     }
 
+    /// 获取 MCP server 提供的工具列表。
     pub async fn list_tools(&mut self) -> Result<Vec<McpTool>> {
         let request = JsonRpcRequest::new(self.next_id(), "tools/list", None);
         let response = self.request(request).await?;
@@ -74,6 +79,7 @@ impl McpClient {
         Ok(tools)
     }
 
+    /// 调用 MCP server 上的工具。
     pub async fn call_tool(
         &mut self,
         name: &str,
@@ -94,6 +100,7 @@ impl McpClient {
         Ok(result)
     }
 
+    /// 发送请求并轮询等待响应（最多约 1 秒）；无法解析的行跳过。
     async fn request(&mut self, request: JsonRpcRequest) -> Result<serde_json::Value> {
         self.transport.send(request).await?;
 

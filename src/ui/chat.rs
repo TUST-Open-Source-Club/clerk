@@ -9,6 +9,7 @@ use ratatui::{
 use crate::store::Message;
 use crate::ui::markdown::markdown_to_text;
 
+/// 聊天面板：按角色着色渲染消息列表，支持滚动。
 pub struct ChatPanel {
     messages: Vec<Message>,
     scroll: u16,
@@ -35,6 +36,7 @@ impl ChatPanel {
         self.scroll = 0;
     }
 
+    /// 更新最后一条消息的内容（流式渲染用）；无消息时返回 false。
     pub fn update_last_message(&mut self, content: impl Into<String>) -> bool {
         if let Some(last) = self.messages.last_mut() {
             last.content = content.into();

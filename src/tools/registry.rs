@@ -13,6 +13,7 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    /// 创建空的注册表，携带工具执行上下文。
     pub fn new(context: ToolContext) -> Self {
         Self {
             tools: HashMap::new(),
@@ -20,6 +21,7 @@ impl ToolRegistry {
         }
     }
 
+    /// 注册工具，同名工具会被覆盖。
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         self.tools.insert(tool.name().to_string(), tool);
     }
@@ -32,6 +34,7 @@ impl ToolRegistry {
         self.tools.keys().cloned().collect()
     }
 
+    /// 收集所有工具的 OpenAI 格式定义。
     pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
         self.tools
             .values()
@@ -78,6 +81,7 @@ impl ToolRegistry {
         self
     }
 
+    /// 按名称执行工具，未知名称返回错误。
     pub async fn execute(
         &self,
         name: &str,

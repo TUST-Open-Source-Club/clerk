@@ -26,6 +26,7 @@ pub struct SubagentManager {
 }
 
 impl SubagentManager {
+    /// 创建管理器；`base_registry` 作为所有子 Agent 工具注册表的克隆蓝本。
     pub fn new(client: Arc<dyn LlmClient>, base_registry: ToolRegistry) -> Self {
         Self {
             subagents: Arc::new(RwLock::new(HashMap::new())),

@@ -6,6 +6,7 @@ use tokio_stream::StreamExt;
 
 use crate::tools::schema::{Tool, ToolContext, ToolResult, ToolSchema, get_string};
 
+/// `browser` 工具：无头 Chromium 网页操作（导航/取 HTML/PDF/截图/点击/输入）。
 pub struct BrowserTool {
     // 浏览器实例由每次调用时按需创建，避免长期占用资源
 }
@@ -15,6 +16,7 @@ impl BrowserTool {
         Self {}
     }
 
+    /// 启动无头 Chromium，并在后台任务中驱动其事件循环。
     async fn launch_browser() -> Result<chromiumoxide::Browser> {
         let config = chromiumoxide::browser::BrowserConfig::builder()
             .headless_mode(chromiumoxide::browser::HeadlessMode::True)
@@ -140,6 +142,7 @@ impl Tool for BrowserTool {
     }
 }
 
+/// 解析输出路径：未指定时用工作目录下的默认文件名，相对路径基于工作目录。
 fn resolve_output_path(
     ctx: &ToolContext,
     output: Option<&str>,
@@ -156,6 +159,7 @@ fn resolve_output_path(
     })
 }
 
+/// 将 HTML 转为 Markdown 文本并按字符数截断。
 fn truncate_html(html: &str, max_chars: usize) -> String {
     let text = crate::tools::web::html_to_markdown(html);
     if text.chars().count() > max_chars {

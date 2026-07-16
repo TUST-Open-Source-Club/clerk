@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{Pool, Row, Sqlite, sqlite::SqlitePoolOptions};
 use std::path::Path;
 
+/// 持久化的聊天消息记录。
 #[derive(Debug, Clone, sqlx::FromRow, PartialEq)]
 pub struct Message {
     pub id: i64,
@@ -12,6 +13,7 @@ pub struct Message {
     pub created_at: DateTime<Utc>,
 }
 
+/// 持久化的会话记录。
 #[derive(Debug, Clone, sqlx::FromRow, PartialEq)]
 pub struct Session {
     pub id: String,
@@ -20,12 +22,14 @@ pub struct Session {
     pub updated_at: DateTime<Utc>,
 }
 
+/// SQLite 持久化存储：会话与消息的增删查。
 #[derive(Debug, Clone)]
 pub struct Store {
     pool: Pool<Sqlite>,
 }
 
 impl Store {
+    /// 打开（必要时创建）数据库并执行迁移。
     pub async fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -47,6 +51,7 @@ impl Store {
         Ok(Self { pool })
     }
 
+    /// 建表与索引（幂等）。
     async fn migrate(pool: &Pool<Sqlite>) -> Result<()> {
         sqlx::query(
             r#"
@@ -75,6 +80,7 @@ impl Store {
         Ok(())
     }
 
+    /// 创建或覆盖会话记录。
     pub async fn create_session(&self, id: &str, title: Option<&str>) -> Result<()> {
         sqlx::query(
             "INSERT OR REPLACE INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
@@ -87,6 +93,7 @@ impl Store {
         Ok(())
     }
 
+    /// 按最近更新时间倒序列出所有会话。
     pub async fn list_sessions(&self) -> Result<Vec<Session>> {
         let sessions = sqlx::query_as::<_, Session>(
             "SELECT id, title, created_at, updated_at FROM sessions ORDER BY updated_at DESC, id DESC",
@@ -97,6 +104,7 @@ impl Store {
         Ok(sessions)
     }
 
+    /// 按 ID 获取会话。
     pub async fn get_session(&self, id: &str) -> Result<Option<Session>> {
         let session = sqlx::query_as::<_, Session>(
             "SELECT id, title, created_at, updated_at FROM sessions WHERE id = ?",
@@ -108,6 +116,7 @@ impl Store {
         Ok(session)
     }
 
+    /// 向会话追加一条消息（同时刷新会话的 updated_at）。
     pub async fn add_message(
         &self,
         session_id: &str,
@@ -130,6 +139,7 @@ impl Store {
         self.get_message(id).await
     }
 
+    /// 按自增 ID 获取消息。
     pub async fn get_message(&self, id: i64) -> Result<Message> {
         let message = sqlx::query_as::<_, Message>(
             "SELECT id, session_id, role, content, created_at FROM messages WHERE id = ?",
@@ -141,6 +151,7 @@ impl Store {
         Ok(message)
     }
 
+    /// 按插入顺序列出会话的所有消息。
     pub async fn list_messages(&self, session_id: &str) -> Result<Vec<Message>> {
         let messages = sqlx::query_as::<_, Message>(
             "SELECT id, session_id, role, content, created_at FROM messages WHERE session_id = ? ORDER BY id ASC",
@@ -152,6 +163,7 @@ impl Store {
         Ok(messages)
     }
 
+    /// 删除会话（消息通过外键级联删除）。
     pub async fn delete_session(&self, id: &str) -> Result<()> {
         sqlx::query("DELETE FROM sessions WHERE id = ?")
             .bind(id)
@@ -161,6 +173,7 @@ impl Store {
         Ok(())
     }
 
+    /// 刷新会话的 updated_at 时间戳。
     async fn touch_session(&self, id: &str) -> Result<()> {
         sqlx::query("UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
             .bind(id)
