@@ -28,3 +28,8 @@ show_sidebar = true
 # auto_approve = ["fs_read", "fs_list", "web_fetch"]
 
 # working_dir = "/path/to/workspace"
+
+# 上下文压缩：历史消息数超过 max_messages 时自动压缩，保留最近 compression_summary_keep 条。
+# [context]
+# max_messages = 50
+# compression_summary_keep = 5

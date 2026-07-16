@@ -37,6 +37,7 @@ struct GuiState {
     client: Arc<dyn LlmClient>,
     registry: Arc<Mutex<ToolRegistry>>,
     multimodal: MultimodalConfig,
+    context: clerk_core::config::ContextConfig,
     working_dir: PathBuf,
     /// 已附加、等待随下一条消息发送的媒体文件
     attachments: Mutex<Vec<PathBuf>>,
@@ -139,6 +140,7 @@ async fn init_state() -> Result<GuiState> {
         client,
         registry,
         multimodal: config.multimodal.clone(),
+        context: config.context.clone(),
         working_dir,
         attachments: Mutex::new(Vec::new()),
         pending_approval: Mutex::new(None),
@@ -193,7 +195,8 @@ async fn run_agent(app: &AppHandle, state: &GuiState, message: String) -> Result
     let (approval_tx, mut approval_rx) = mpsc::unbounded_channel::<ApprovalRequest>();
 
     let runner = PlanExecuteRunner::new(state.client.clone(), state.registry.clone())
-        .with_approval_tx(approval_tx);
+        .with_approval_tx(approval_tx)
+        .with_context_config(state.context.clone());
     let ctx = state.session_ctx.clone();
     let mut run = std::pin::pin!(runner.run_stream(ctx, &text, chunk_tx, Some(event_tx)));
 

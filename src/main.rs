@@ -192,7 +192,8 @@ async fn run_app() -> Result<()> {
         store.create_session(&session_id, Some("命令会话")).await?;
         store.add_message(&session_id, "user", &command).await?;
 
-        let runner = clerk_core::agent::runner::PlanExecuteRunner::new(client, registry);
+        let runner = clerk_core::agent::runner::PlanExecuteRunner::new(client, registry)
+            .with_context_config(config.context.clone());
         let mut ctx = clerk_core::agent::session::SessionContext::new(
             clerk_core::prompt::build_system_prompt(),
         );
@@ -213,7 +214,7 @@ async fn run_app() -> Result<()> {
         model: config.llm.model.clone(),
         base_url: config.llm.base_url.clone(),
     };
-    let app = App::new(
+    let mut app = App::new(
         store,
         client,
         registry,
@@ -221,6 +222,7 @@ async fn run_app() -> Result<()> {
         model_info,
     )
     .await?;
+    app.set_context_config(config.context.clone());
     let result = app.run(&mut terminal).await;
 
     restore_terminal(&mut terminal)?;

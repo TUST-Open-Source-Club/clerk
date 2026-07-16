@@ -76,6 +76,8 @@ pub struct App {
     stream_started_at: Option<Instant>,
     /// 首个输出块到达前，聊天区加载占位消息的下标
     placeholder_index: Option<usize>,
+    /// 会话选择器：Some 表示 UI 处于会话选择模式
+    pub session_picker: Option<SessionPickerState>,
 }
 
 /// 待审批的工具调用：保存审批请求与一次性响应端
@@ -84,6 +86,13 @@ pub struct PendingApproval {
     pub name: String,
     pub arguments: Value,
     respond: tokio::sync::oneshot::Sender<bool>,
+}
+
+/// 会话选择器状态：保存候选会话与当前选中下标。
+#[derive(Debug)]
+pub struct SessionPickerState {
+    pub sessions: Vec<clerk_core::store::sqlite::Session>,
+    pub selected: usize,
 }
 
 /// 流式任务发往 UI 的事件：输出块、工具事件、审批请求与完成信号。
@@ -146,6 +155,7 @@ impl App {
             spinner_frame: 0,
             stream_started_at: None,
             placeholder_index: None,
+            session_picker: None,
         })
     }
 
@@ -197,7 +207,36 @@ impl App {
             spinner_frame: 0,
             stream_started_at: None,
             placeholder_index: None,
+            session_picker: None,
         })
+    }
+
+    /// 设置上下文压缩配置，替换内部 runner。
+    pub fn set_context_config(&mut self, config: clerk_core::config::ContextConfig) {
+        self.runner = self.runner.clone().with_context_config(config);
+    }
+
+    /// 切换到指定会话：加载历史消息并清空当前附件与工具事件。
+    pub async fn select_session(&mut self, session_id: &str) -> Result<()> {
+        if self.store.get_session(session_id).await?.is_none() {
+            self.store
+                .create_session(session_id, Some("恢复会话"))
+                .await?;
+        }
+        let messages = self.store.list_messages(session_id).await?;
+        self.session_id = session_id.to_string();
+        self.chat.set_messages(messages);
+        self.attachments.clear();
+        self.tool_events.clear();
+        self.streaming_reply.clear();
+        self.streaming_message_added = false;
+        self.placeholder_index = None;
+        self.session_ctx = Arc::new(Mutex::new(SessionContext::new(build_system_prompt())));
+        self.chat.push_message(system_message(
+            &self.session_id,
+            &format!("已加载会话 {}", session_id),
+        ));
+        Ok(())
     }
 
     /// 主事件循环：绘制界面，分发键盘事件与流式事件，驱动加载动画。
@@ -259,6 +298,37 @@ impl App {
                     if let Some(abort) = self.stream_abort.take() {
                         abort.abort();
                     }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // 会话选择器激活时：↑↓ 选择，Enter 确认，ESC 取消，其余按键忽略
+        if self.session_picker.is_some() {
+            match key.code {
+                KeyCode::Up => {
+                    if let Some(picker) = &mut self.session_picker {
+                        picker.selected = picker.selected.saturating_sub(1);
+                    }
+                }
+                KeyCode::Down => {
+                    if let Some(picker) = &mut self.session_picker
+                        && picker.selected + 1 < picker.sessions.len()
+                    {
+                        picker.selected += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(picker) = self.session_picker.take() {
+                        let session_id = picker.sessions[picker.selected].id.clone();
+                        self.select_session(&session_id).await?;
+                    }
+                }
+                KeyCode::Esc => {
+                    self.session_picker = None;
+                    self.chat
+                        .push_message(system_message(&self.session_id, "已取消会话选择"));
                 }
                 _ => {}
             }
@@ -442,23 +512,28 @@ impl App {
                 self.chat
                     .push_message(system_message(&self.session_id, &msg));
             }
-            "/sessions" => {
-                let content = match self.store.list_sessions().await {
-                    Ok(sessions) if sessions.is_empty() => "暂无会话".to_string(),
-                    Ok(sessions) => {
-                        let lines: Vec<String> = sessions
-                            .iter()
-                            .map(|s| {
-                                format!("- {} ({})", s.id, s.title.as_deref().unwrap_or("无标题"))
-                            })
-                            .collect();
-                        format!("最近会话：\n{}", lines.join("\n"))
-                    }
-                    Err(e) => format!("获取会话列表失败: {:#}", e),
-                };
-                self.chat
-                    .push_message(system_message(&self.session_id, &content));
-            }
+            "/sessions" => match self.store.list_sessions().await {
+                Ok(sessions) if sessions.is_empty() => {
+                    self.chat
+                        .push_message(system_message(&self.session_id, "暂无会话"));
+                }
+                Ok(sessions) => {
+                    self.session_picker = Some(SessionPickerState {
+                        sessions,
+                        selected: 0,
+                    });
+                    self.chat.push_message(system_message(
+                        &self.session_id,
+                        "已打开会话选择器：↑↓ 选择，Enter 确认，ESC 取消",
+                    ));
+                }
+                Err(e) => {
+                    self.chat.push_message(system_message(
+                        &self.session_id,
+                        &format!("获取会话列表失败: {:#}", e),
+                    ));
+                }
+            },
             "/attach" => {
                 let arg = text.strip_prefix("/attach").unwrap_or("").trim();
                 if arg.is_empty() {
@@ -905,7 +980,55 @@ impl App {
 
         let status = Paragraph::new(vec![Line::from(state_text).style(state_style), info_line]);
         frame.render_widget(status, chunks[status_idx]);
+
+        if let Some(picker) = &self.session_picker {
+            render_session_picker(frame, picker);
+        }
     }
+}
+
+/// 渲染会话选择器浮层：标题、会话列表与操作提示。
+fn render_session_picker(frame: &mut Frame, picker: &SessionPickerState) {
+    let area = frame.area();
+    let width = area.width.saturating_sub(8).min(80);
+    let height = (picker.sessions.len() as u16 + 4)
+        .min(area.height.saturating_sub(4))
+        .max(6);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let rect = ratatui::layout::Rect::new(x, y, width, height);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "选择会话",
+        Style::default().fg(Color::Cyan),
+    )));
+    lines.push(Line::from(""));
+    for (i, session) in picker.sessions.iter().enumerate() {
+        let title = session.title.as_deref().unwrap_or("无标题");
+        let text = format!(
+            "{} {} ({})",
+            session.updated_at.format("%m-%d %H:%M"),
+            title,
+            short_id(&session.id)
+        );
+        let style = if i == picker.selected {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑↓ 选择，Enter 确认，ESC 取消",
+        Style::default().fg(Color::Gray),
+    )));
+
+    let block = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .title("会话");
+    frame.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
 fn spinner_char(frame: usize) -> char {
@@ -1683,9 +1806,46 @@ mod tests {
         let (mut app, _dir) = create_test_app().await;
         type_text(&mut app, "/sessions").await;
         press_enter(&mut app).await;
+        assert!(app.session_picker.is_some());
         let last = app.chat.messages().last().unwrap();
         assert_eq!(last.role, "system");
-        assert!(last.content.contains(&app.session_id));
+        assert!(last.content.contains("会话选择器"));
+    }
+
+    #[tokio::test]
+    async fn test_session_picker_navigation() {
+        let (mut app, _dir) = create_test_app().await;
+        // 创建第二个会话
+        let other_id = "other-session";
+        app.store
+            .create_session(other_id, Some("其他会话"))
+            .await
+            .unwrap();
+        type_text(&mut app, "/sessions").await;
+        press_enter(&mut app).await;
+
+        let picker = app.session_picker.as_ref().unwrap();
+        assert_eq!(picker.sessions.len(), 2);
+        assert_eq!(picker.selected, 0);
+
+        app.handle_key(KeyEvent::from(KeyCode::Down)).await.unwrap();
+        assert_eq!(app.session_picker.as_ref().unwrap().selected, 1);
+
+        app.handle_key(KeyEvent::from(KeyCode::Up)).await.unwrap();
+        assert_eq!(app.session_picker.as_ref().unwrap().selected, 0);
+    }
+
+    #[tokio::test]
+    async fn test_session_picker_esc_cancels() {
+        let (mut app, _dir) = create_test_app().await;
+        type_text(&mut app, "/sessions").await;
+        press_enter(&mut app).await;
+        assert!(app.session_picker.is_some());
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await.unwrap();
+        assert!(app.session_picker.is_none());
+        let last = app.chat.messages().last().unwrap();
+        assert!(last.content.contains("已取消"));
     }
 
     #[tokio::test]

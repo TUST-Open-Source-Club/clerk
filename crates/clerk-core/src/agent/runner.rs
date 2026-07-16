@@ -59,6 +59,8 @@ pub struct PlanExecuteRunner {
     max_replans: usize,
     /// 工具审批请求通道；为 None 时不做审批（如非交互模式）
     approval_tx: Option<mpsc::UnboundedSender<ApprovalRequest>>,
+    /// 上下文压缩配置；为 None 时不压缩
+    context_config: Option<crate::config::ContextConfig>,
 }
 
 impl PlanExecuteRunner {
@@ -69,6 +71,7 @@ impl PlanExecuteRunner {
             max_iterations: 10,
             max_replans: 1,
             approval_tx: None,
+            context_config: None,
         }
     }
 
@@ -77,9 +80,22 @@ impl PlanExecuteRunner {
         self
     }
 
+    pub fn with_context_config(mut self, config: crate::config::ContextConfig) -> Self {
+        self.context_config = Some(config);
+        self
+    }
+
     pub fn with_approval_tx(mut self, tx: mpsc::UnboundedSender<ApprovalRequest>) -> Self {
         self.approval_tx = Some(tx);
         self
+    }
+
+    /// 若配置了上下文压缩且超过阈值，则对会话历史进行压缩。
+    async fn compress_if_needed(&self, ctx: &mut SessionContext) -> Result<()> {
+        if let Some(config) = &self.context_config {
+            ctx.maybe_compress(&*self.client, config).await?;
+        }
+        Ok(())
     }
 
     /// 非流式运行：制定计划 -> 逐步执行 -> 总结结果。
@@ -107,6 +123,7 @@ impl PlanExecuteRunner {
         {
             let mut ctx = ctx.lock().await;
             ctx.add_message(Message::user(user_input));
+            self.compress_if_needed(&mut ctx).await?;
             let steps = self.generate_plan(&mut ctx, event_tx.as_ref()).await?;
             self.execute_plan(&mut ctx, steps, event_tx.as_ref())
                 .await?;

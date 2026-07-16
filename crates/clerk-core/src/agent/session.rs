@@ -1,4 +1,5 @@
 use crate::agent::llm::Message;
+use crate::config::ContextConfig;
 
 /// 会话上下文：维护当前对话消息与系统提示词
 #[derive(Debug, Clone)]
@@ -42,6 +43,54 @@ impl SessionContext {
             self.messages.drain(0..excess);
         }
     }
+
+    /// 当历史消息超过阈值时，将旧消息压缩为一条摘要。
+    /// 返回 true 表示发生了压缩。
+    pub async fn maybe_compress(
+        &mut self,
+        client: &dyn crate::agent::llm::LlmClient,
+        config: &ContextConfig,
+    ) -> anyhow::Result<bool> {
+        if self.messages.len() <= config.max_messages {
+            return Ok(false);
+        }
+        if config.compression_summary_keep >= self.messages.len() {
+            return Ok(false);
+        }
+
+        let split = self.messages.len() - config.compression_summary_keep;
+        let old_messages = self.messages.drain(0..split).collect::<Vec<_>>();
+        let old_text = old_messages
+            .iter()
+            .map(|m| format!("[{}] {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+
+        let summary_prompt = format!(
+            "请将以下对话历史压缩为简洁摘要，保留关键事实、决定和任务状态：
+
+{}",
+            old_text
+        );
+
+        let response = client
+            .chat(vec![Message::user(summary_prompt)], vec![])
+            .await?;
+
+        let summary = match response {
+            crate::agent::llm::LlmResponse::Text(text) => text,
+            crate::agent::llm::LlmResponse::ToolCalls(_) => {
+                return Ok(false);
+            }
+        };
+
+        self.messages
+            .insert(0, Message::system(format!("[历史对话摘要] {}", summary)));
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
@@ -66,5 +115,34 @@ mod tests {
         let messages = ctx.build_messages();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].content, "sys");
+    }
+
+    #[tokio::test]
+    async fn test_maybe_compress_triggers() {
+        struct FakeLlm;
+
+        #[async_trait::async_trait]
+        impl crate::agent::llm::LlmClient for FakeLlm {
+            async fn chat(
+                &self,
+                _messages: Vec<Message>,
+                _tools: Vec<crate::agent::llm::ToolDefinition>,
+            ) -> anyhow::Result<crate::agent::llm::LlmResponse> {
+                Ok(crate::agent::llm::LlmResponse::Text("摘要".to_string()))
+            }
+        }
+
+        let mut ctx = SessionContext::new("sys");
+        for i in 0..10 {
+            ctx.add_message(Message::user(format!("msg {}", i)));
+        }
+        let config = ContextConfig {
+            max_messages: 5,
+            compression_summary_keep: 2,
+        };
+        let compressed = ctx.maybe_compress(&FakeLlm, &config).await.unwrap();
+        assert!(compressed);
+        assert_eq!(ctx.messages.len(), 3);
+        assert!(ctx.messages[0].content.contains("摘要"));
     }
 }

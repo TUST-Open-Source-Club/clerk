@@ -106,6 +106,34 @@ impl PermissionConfig {
     }
 }
 
+/// 上下文压缩配置：控制会话历史自动压缩。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextConfig {
+    /// 历史消息数超过该值时触发压缩。
+    #[serde(default = "default_max_messages")]
+    pub max_messages: usize,
+    /// 压缩后保留的最近消息数。
+    #[serde(default = "default_compression_keep")]
+    pub compression_summary_keep: usize,
+}
+
+fn default_max_messages() -> usize {
+    50
+}
+
+fn default_compression_keep() -> usize {
+    5
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            max_messages: default_max_messages(),
+            compression_summary_keep: default_compression_keep(),
+        }
+    }
+}
+
 /// Clerk 顶层配置，对应 config.toml。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -120,6 +148,8 @@ pub struct Config {
     /// 工具审批配置；缺省（None）时保持旧行为：所有工具无需审批直接执行。
     #[serde(default)]
     pub permissions: Option<PermissionConfig>,
+    #[serde(default)]
+    pub context: ContextConfig,
     #[serde(default)]
     pub working_dir: Option<PathBuf>,
 }
