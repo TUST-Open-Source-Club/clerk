@@ -80,6 +80,7 @@ mod tests {
 
         let ctx = ToolContext {
             working_dir: dir.path().to_path_buf(),
+            ..Default::default()
         };
         let result = tool.execute(args, &ctx).await.unwrap();
         assert!(result.to_string_for_model().contains("hello"));
@@ -94,6 +95,7 @@ mod tests {
 
         let ctx = ToolContext {
             working_dir: dir.path().to_path_buf(),
+            ..Default::default()
         };
         let result = tool.execute(args, &ctx).await.unwrap();
         match result {

@@ -34,6 +34,18 @@ pub enum RunnerEvent {
     Error(String),
 }
 
+/// 工具审批请求：runner 在执行需要审批的工具前发送给 UI，
+/// 并等待一次性响应（true = 批准，false = 拒绝）。
+#[derive(Debug)]
+pub struct ApprovalRequest {
+    pub name: String,
+    pub arguments: Value,
+    pub respond: tokio::sync::oneshot::Sender<bool>,
+}
+
+/// 用户拒绝执行工具时注入给模型的结果文本
+const TOOL_REJECTED_MESSAGE: &str = "用户拒绝执行该工具";
+
 /// Plan-Execute 模式的 Agent 运行器：
 /// 先为用户请求生成执行计划，再逐步执行（每步内部是受限的工具调用循环），
 /// 步骤失败时允许有限次重计划，最后总结结果回复用户。
@@ -45,6 +57,8 @@ pub struct PlanExecuteRunner {
     max_iterations: usize,
     /// 单次请求允许的最大重计划次数
     max_replans: usize,
+    /// 工具审批请求通道；为 None 时不做审批（如非交互模式）
+    approval_tx: Option<mpsc::UnboundedSender<ApprovalRequest>>,
 }
 
 impl PlanExecuteRunner {
@@ -54,11 +68,17 @@ impl PlanExecuteRunner {
             registry,
             max_iterations: 10,
             max_replans: 1,
+            approval_tx: None,
         }
     }
 
     pub fn with_max_iterations(mut self, max: usize) -> Self {
         self.max_iterations = max;
+        self
+    }
+
+    pub fn with_approval_tx(mut self, tx: mpsc::UnboundedSender<ApprovalRequest>) -> Self {
+        self.approval_tx = Some(tx);
         self
     }
 
@@ -361,6 +381,18 @@ impl PlanExecuteRunner {
             });
         }
 
+        if !self.wait_for_approval(name, &args, event_tx).await {
+            let msg = TOOL_REJECTED_MESSAGE.to_string();
+            info!("用户拒绝执行工具: {}", name);
+            if let Some(tx) = event_tx {
+                let _ = tx.send(RunnerEvent::ToolResult {
+                    name: name.clone(),
+                    result: msg.clone(),
+                });
+            }
+            return Ok(msg);
+        }
+
         info!("执行工具: {} 参数: {}", name, args);
         let registry = self.registry.lock().await;
         let result = registry.execute(name, args_map).await;
@@ -386,6 +418,55 @@ impl PlanExecuteRunner {
         };
 
         Ok(result_str)
+    }
+
+    /// 若工具需要审批，向 UI 发送审批请求并等待用户决定。
+    /// 返回 true 表示可以执行（无需审批、已批准、或未配置审批通道时按批准处理）。
+    async fn wait_for_approval(
+        &self,
+        name: &str,
+        args: &Value,
+        event_tx: Option<&mpsc::UnboundedSender<RunnerEvent>>,
+    ) -> bool {
+        let needs_approval = {
+            let registry = self.registry.lock().await;
+            registry.requires_approval(name)
+        };
+        if !needs_approval {
+            return true;
+        }
+
+        let Some(approval_tx) = &self.approval_tx else {
+            warn!("工具 {} 需要审批但没有审批通道，按批准处理", name);
+            return true;
+        };
+
+        let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
+        if approval_tx
+            .send(ApprovalRequest {
+                name: name.to_string(),
+                arguments: args.clone(),
+                respond: respond_tx,
+            })
+            .is_err()
+        {
+            warn!("审批请求发送失败（UI 已关闭？），拒绝执行工具 {}", name);
+            return false;
+        }
+
+        match respond_rx.await {
+            Ok(approved) => approved,
+            Err(_) => {
+                // 响应端被丢弃（如任务被取消），视为拒绝
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(RunnerEvent::Error(format!(
+                        "工具 {} 的审批响应丢失，已拒绝执行",
+                        name
+                    )));
+                }
+                false
+            }
+        }
     }
 }
 
@@ -725,6 +806,109 @@ mod tests {
         assert!(saw_plan, "should receive Plan event");
         assert!(saw_tool_call, "should receive ToolCall event");
         assert!(saw_tool_result, "should receive ToolResult event");
+    }
+
+    // ---- 工具审批 ----
+
+    fn registry_with_approval() -> ToolRegistry {
+        let mut registry = ToolRegistry::new(ToolContext {
+            permissions: Some(crate::config::PermissionConfig::default()),
+            ..Default::default()
+        });
+        registry.register(Arc::new(FakeTool));
+        registry
+    }
+
+    #[tokio::test]
+    async fn test_tool_approval_accepted() {
+        let client = Arc::new(FakeLlm {
+            responses: Mutex::new(vec![
+                LlmResponse::Text(r#"["调用工具"]"#.to_string()),
+                LlmResponse::ToolCalls(vec![fake_tool_call("fake")]),
+                LlmResponse::Text("step done".to_string()),
+                LlmResponse::Text("final".to_string()),
+            ]),
+        });
+        let (approval_tx, mut approval_rx) = mpsc::unbounded_channel::<ApprovalRequest>();
+        let runner = PlanExecuteRunner::new(client, Arc::new(Mutex::new(registry_with_approval())))
+            .with_approval_tx(approval_tx);
+        let mut ctx = SessionContext::new("sys");
+
+        let responder = tokio::spawn(async move {
+            let req = approval_rx.recv().await.unwrap();
+            assert_eq!(req.name, "fake");
+            let _ = req.respond.send(true);
+        });
+
+        let result = runner.run(&mut ctx, "call", None).await.unwrap();
+        responder.await.unwrap();
+        assert_eq!(result, "final");
+
+        let tool_msgs: Vec<&Message> = ctx
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, Role::Tool))
+            .collect();
+        assert_eq!(tool_msgs.len(), 1);
+        assert_eq!(tool_msgs[0].content, "done");
+    }
+
+    #[tokio::test]
+    async fn test_tool_approval_rejected() {
+        let client = Arc::new(FakeLlm {
+            responses: Mutex::new(vec![
+                LlmResponse::Text(r#"["调用工具"]"#.to_string()),
+                LlmResponse::ToolCalls(vec![fake_tool_call("fake")]),
+                LlmResponse::Text("step done".to_string()),
+                LlmResponse::Text("final".to_string()),
+            ]),
+        });
+        let (approval_tx, mut approval_rx) = mpsc::unbounded_channel::<ApprovalRequest>();
+        let runner = PlanExecuteRunner::new(client, Arc::new(Mutex::new(registry_with_approval())))
+            .with_approval_tx(approval_tx);
+        let mut ctx = SessionContext::new("sys");
+
+        let responder = tokio::spawn(async move {
+            let req = approval_rx.recv().await.unwrap();
+            assert_eq!(req.name, "fake");
+            let _ = req.respond.send(false);
+        });
+
+        let result = runner.run(&mut ctx, "call", None).await.unwrap();
+        responder.await.unwrap();
+        assert_eq!(result, "final");
+
+        let tool_msgs: Vec<&Message> = ctx
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, Role::Tool))
+            .collect();
+        assert_eq!(tool_msgs.len(), 1);
+        assert_eq!(tool_msgs[0].content, "用户拒绝执行该工具");
+    }
+
+    #[tokio::test]
+    async fn test_tool_approval_without_channel_proceeds() {
+        let client = Arc::new(FakeLlm {
+            responses: Mutex::new(vec![
+                LlmResponse::Text(r#"["调用工具"]"#.to_string()),
+                LlmResponse::ToolCalls(vec![fake_tool_call("fake")]),
+                LlmResponse::Text("step done".to_string()),
+                LlmResponse::Text("final".to_string()),
+            ]),
+        });
+        // 配置了审批但没有审批通道（如非交互模式），按批准处理
+        let runner = PlanExecuteRunner::new(client, Arc::new(Mutex::new(registry_with_approval())));
+        let mut ctx = SessionContext::new("sys");
+
+        let result = runner.run(&mut ctx, "call", None).await.unwrap();
+        assert_eq!(result, "final");
+        let tool_msgs: Vec<&Message> = ctx
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, Role::Tool))
+            .collect();
+        assert_eq!(tool_msgs[0].content, "done");
     }
 
     // ---- 重计划 ----

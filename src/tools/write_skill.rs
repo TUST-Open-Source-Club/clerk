@@ -55,6 +55,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let ctx = ToolContext {
             working_dir: dir.path().to_path_buf(),
+            ..Default::default()
         };
         let tool = WriteSkillTool::new();
         let mut args = HashMap::new();
@@ -78,6 +79,7 @@ mod tests {
     async fn test_write_skill_missing_args() {
         let ctx = ToolContext {
             working_dir: std::env::temp_dir(),
+            ..Default::default()
         };
         let tool = WriteSkillTool::new();
         let result = tool.execute(HashMap::new(), &ctx).await;

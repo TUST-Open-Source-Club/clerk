@@ -175,6 +175,7 @@ mod tests {
     fn ctx(dir: &TempDir) -> ToolContext {
         ToolContext {
             working_dir: dir.path().to_path_buf(),
+            ..Default::default()
         }
     }
 

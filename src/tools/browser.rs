@@ -174,6 +174,7 @@ mod tests {
     fn test_resolve_output_path() {
         let ctx = ToolContext {
             working_dir: std::path::PathBuf::from("/tmp"),
+            ..Default::default()
         };
         let path = resolve_output_path(&ctx, None, "out.pdf").unwrap();
         assert_eq!(path, std::path::PathBuf::from("/tmp/out.pdf"));

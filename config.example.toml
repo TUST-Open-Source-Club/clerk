@@ -21,4 +21,10 @@ show_sidebar = true
 # supports_images = true
 # supports_video = true
 
+# 工具审批：配置后，除 auto_approve 外的工具执行前需要用户确认；
+# 不配置本节则保持旧行为（所有工具直接执行）。
+# [permissions]
+# yolo = false
+# auto_approve = ["fs_read", "fs_list", "web_fetch"]
+
 # working_dir = "/path/to/workspace"

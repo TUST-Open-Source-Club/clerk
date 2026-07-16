@@ -236,6 +236,7 @@ mod tests {
     fn ctx(dir: &TempDir) -> ToolContext {
         ToolContext {
             working_dir: dir.path().to_path_buf(),
+            ..Default::default()
         }
     }
 
@@ -243,6 +244,7 @@ mod tests {
     fn test_resolve_output_path() {
         let ctx = ToolContext {
             working_dir: std::path::PathBuf::from("/tmp"),
+            ..Default::default()
         };
         let path = resolve_path(&ctx.working_dir, "a.pdf").unwrap();
         assert_eq!(path, std::path::PathBuf::from("/tmp/a.pdf"));

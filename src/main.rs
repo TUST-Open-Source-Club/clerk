@@ -66,9 +66,11 @@ fn setup_logging() -> Result<()> {
 fn create_tool_registry(
     working_dir: &std::path::Path,
     client: Arc<dyn crate::agent::llm::LlmClient>,
+    permissions: Option<crate::config::PermissionConfig>,
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new(ToolContext {
         working_dir: working_dir.to_path_buf(),
+        permissions,
     });
     registry.register(Arc::new(fs::ReadFileTool));
     registry.register(Arc::new(fs::WriteFileTool));
@@ -239,6 +241,7 @@ async fn run_app() -> Result<()> {
     let registry = Arc::new(Mutex::new(create_tool_registry(
         &working_dir,
         client.clone(),
+        config.permissions.clone(),
     )));
 
     if let Some(command) = args.command {
@@ -341,7 +344,7 @@ mod tests {
     #[test]
     fn test_create_tool_registry() {
         let client: Arc<dyn crate::agent::llm::LlmClient> = Arc::new(FakeLlm);
-        let registry = create_tool_registry(std::path::Path::new("/tmp"), client);
+        let registry = create_tool_registry(std::path::Path::new("/tmp"), client, None);
         let names = registry.names();
         assert!(names.contains(&"fs_read".to_string()));
         assert!(names.contains(&"shell".to_string()));
@@ -350,12 +353,14 @@ mod tests {
         assert!(names.contains(&"write_skill".to_string()));
         assert!(names.contains(&"read_media_file".to_string()));
         assert!(names.contains(&"render_to_image".to_string()));
+        // 未配置 permissions 时不需要审批（向后兼容）
+        assert!(!registry.requires_approval("shell"));
     }
 
     #[test]
     fn test_all_tools_have_valid_schema() {
         let client: Arc<dyn crate::agent::llm::LlmClient> = Arc::new(FakeLlm);
-        let registry = create_tool_registry(std::path::Path::new("/tmp"), client);
+        let registry = create_tool_registry(std::path::Path::new("/tmp"), client, None);
         for name in registry.names() {
             let tool = registry.get(&name).unwrap();
             assert_eq!(tool.name(), name);

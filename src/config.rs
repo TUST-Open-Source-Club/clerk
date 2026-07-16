@@ -68,6 +68,40 @@ pub struct MultimodalConfig {
     pub supports_video: bool,
 }
 
+fn default_auto_approve() -> Vec<String> {
+    vec![
+        "fs_read".to_string(),
+        "fs_list".to_string(),
+        "web_fetch".to_string(),
+    ]
+}
+
+/// 工具审批配置：yolo 为 true 时全部自动批准；
+/// 否则仅 auto_approve 列表中的工具自动批准，其余工具执行前需要用户确认。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionConfig {
+    #[serde(default)]
+    pub yolo: bool,
+    #[serde(default = "default_auto_approve")]
+    pub auto_approve: Vec<String>,
+}
+
+impl Default for PermissionConfig {
+    fn default() -> Self {
+        Self {
+            yolo: false,
+            auto_approve: default_auto_approve(),
+        }
+    }
+}
+
+impl PermissionConfig {
+    /// 判断指定工具执行前是否需要用户审批。
+    pub fn requires_approval(&self, tool_name: &str) -> bool {
+        !self.yolo && !self.auto_approve.iter().any(|t| t == tool_name)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
@@ -78,6 +112,9 @@ pub struct Config {
     pub storage: StorageConfig,
     #[serde(default)]
     pub multimodal: MultimodalConfig,
+    /// 工具审批配置；缺省（None）时保持旧行为：所有工具无需审批直接执行。
+    #[serde(default)]
+    pub permissions: Option<PermissionConfig>,
     #[serde(default)]
     pub working_dir: Option<PathBuf>,
 }
@@ -168,6 +205,11 @@ show_sidebar = true
 # supports_images = true
 # supports_video = true
 
+# 工具审批：配置后，除 auto_approve 外的工具执行前需要用户确认。
+# [permissions]
+# yolo = false
+# auto_approve = ["fs_read", "fs_list", "web_fetch"]
+
 # working_dir = "/path/to/workspace"
 "#
     .to_string()
@@ -188,6 +230,7 @@ mod tests {
         assert!((config.llm.temperature - 0.7_f32).abs() < f32::EPSILON);
         assert!(!config.tui.show_sidebar);
         assert!(config.storage.db_path.is_none());
+        assert!(config.permissions.is_none());
     }
 
     #[test]
@@ -247,6 +290,7 @@ db_path = "/tmp/test.db"
         assert!(example.contains("api_key"));
         assert!(example.contains("[tui]"));
         assert!(example.contains("[multimodal]"));
+        assert!(example.contains("[permissions]"));
     }
 
     #[test]
@@ -273,6 +317,97 @@ db_path = "/tmp/test.db"
     }
 
     #[test]
+    fn test_load_permissions_config() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[llm]
+api_key = "sk-test"
+
+[permissions]
+yolo = true
+auto_approve = ["fs_read"]
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(Some(&path)).unwrap();
+        let permissions = config.permissions.unwrap();
+        assert!(permissions.yolo);
+        assert_eq!(permissions.auto_approve, vec!["fs_read".to_string()]);
+    }
+
+    #[test]
+    fn test_load_empty_permissions_uses_defaults() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[llm]
+api_key = "sk-test"
+
+[permissions]
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(Some(&path)).unwrap();
+        let permissions = config.permissions.unwrap();
+        assert!(!permissions.yolo);
+        assert_eq!(
+            permissions.auto_approve,
+            vec![
+                "fs_read".to_string(),
+                "fs_list".to_string(),
+                "web_fetch".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_load_without_permissions_is_none() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[llm]
+api_key = "sk-test"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(Some(&path)).unwrap();
+        assert!(config.permissions.is_none());
+    }
+
+    #[test]
+    fn test_permission_requires_approval() {
+        let permissions = PermissionConfig::default();
+        assert!(!permissions.requires_approval("fs_read"));
+        assert!(!permissions.requires_approval("fs_list"));
+        assert!(!permissions.requires_approval("web_fetch"));
+        assert!(permissions.requires_approval("fs_write"));
+        assert!(permissions.requires_approval("shell"));
+
+        let yolo = PermissionConfig {
+            yolo: true,
+            ..Default::default()
+        };
+        assert!(!yolo.requires_approval("shell"));
+
+        let custom = PermissionConfig {
+            yolo: false,
+            auto_approve: vec!["shell".to_string()],
+        };
+        assert!(!custom.requires_approval("shell"));
+        assert!(custom.requires_approval("fs_read"));
+    }
+
+    #[test]
     fn test_save_and_load() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("saved.toml");
@@ -284,6 +419,10 @@ db_path = "/tmp/test.db"
         config.working_dir = Some(PathBuf::from("/tmp/wd"));
         config.multimodal.supports_images = true;
         config.multimodal.supports_video = true;
+        config.permissions = Some(PermissionConfig {
+            yolo: false,
+            auto_approve: vec!["fs_read".to_string()],
+        });
 
         config.save(Some(&path)).unwrap();
         let loaded = Config::load(Some(&path)).unwrap();
@@ -294,6 +433,9 @@ db_path = "/tmp/test.db"
         assert_eq!(loaded.working_dir, Some(PathBuf::from("/tmp/wd")));
         assert!(loaded.multimodal.supports_images);
         assert!(loaded.multimodal.supports_video);
+        let permissions = loaded.permissions.unwrap();
+        assert!(!permissions.yolo);
+        assert_eq!(permissions.auto_approve, vec!["fs_read".to_string()]);
     }
 
     #[test]

@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::agent::{
     llm::{LlmClient, StreamChunk},
-    runner::{PlanExecuteRunner, RunnerEvent},
+    runner::{ApprovalRequest, PlanExecuteRunner, RunnerEvent},
     session::SessionContext,
 };
 use crate::config::MultimodalConfig;
@@ -45,11 +45,14 @@ pub struct App {
     pub should_quit: bool,
     pub tool_events: Vec<RunnerEvent>,
     pub yolo_mode: bool,
+    /// 等待用户审批的工具调用；Some 表示 UI 处于审批模式
+    pub approval_mode: Option<PendingApproval>,
     pub multimodal: MultimodalConfig,
     pub attachments: Vec<PathBuf>,
     pub streaming_reply: String,
     store: Store,
     runner: PlanExecuteRunner,
+    registry: Arc<Mutex<ToolRegistry>>,
     session_ctx: Arc<Mutex<SessionContext>>,
     working_dir: PathBuf,
     stream_rx: Option<mpsc::UnboundedReceiver<StreamEvent>>,
@@ -58,10 +61,23 @@ pub struct App {
     spinner_frame: usize,
 }
 
+/// 待审批的工具调用：保存审批请求与一次性响应端
+#[derive(Debug)]
+pub struct PendingApproval {
+    pub name: String,
+    pub arguments: Value,
+    respond: tokio::sync::oneshot::Sender<bool>,
+}
+
 #[derive(Debug)]
 enum StreamEvent {
     Chunk(StreamChunk),
     ToolEvent(RunnerEvent),
+    ApprovalRequired {
+        name: String,
+        arguments: Value,
+        respond: tokio::sync::oneshot::Sender<bool>,
+    },
     Done(Result<String>),
 }
 
@@ -75,11 +91,16 @@ impl App {
         let session_id = Uuid::new_v4().to_string();
         store.create_session(&session_id, Some("新会话")).await?;
         let messages = store.list_messages(&session_id).await.unwrap_or_default();
-        let working_dir = registry.lock().await.context().working_dir.clone();
+        let (working_dir, yolo_mode) = {
+            let registry = registry.lock().await;
+            let ctx = registry.context();
+            let yolo = ctx.permissions.as_ref().is_some_and(|p| p.yolo);
+            (ctx.working_dir.clone(), yolo)
+        };
 
         info!("创建新会话: {}", session_id);
         let session_ctx = Arc::new(Mutex::new(SessionContext::new(build_system_prompt())));
-        let runner = PlanExecuteRunner::new(client, registry);
+        let runner = PlanExecuteRunner::new(client, registry.clone());
 
         Ok(Self {
             session_id,
@@ -88,12 +109,14 @@ impl App {
             status: AppStatus::Idle,
             should_quit: false,
             tool_events: Vec::new(),
-            yolo_mode: false,
+            yolo_mode,
+            approval_mode: None,
             multimodal,
             attachments: Vec::new(),
             streaming_reply: String::new(),
             store,
             runner,
+            registry,
             session_ctx,
             working_dir,
             stream_rx: None,
@@ -114,11 +137,16 @@ impl App {
             store.create_session(session_id, Some("恢复会话")).await?;
         }
         let messages = store.list_messages(session_id).await?;
-        let working_dir = registry.lock().await.context().working_dir.clone();
+        let (working_dir, yolo_mode) = {
+            let registry = registry.lock().await;
+            let ctx = registry.context();
+            let yolo = ctx.permissions.as_ref().is_some_and(|p| p.yolo);
+            (ctx.working_dir.clone(), yolo)
+        };
 
         info!("加载会话: {}", session_id);
         let session_ctx = Arc::new(Mutex::new(SessionContext::new(build_system_prompt())));
-        let runner = PlanExecuteRunner::new(client, registry);
+        let runner = PlanExecuteRunner::new(client, registry.clone());
 
         Ok(Self {
             session_id: session_id.to_string(),
@@ -127,12 +155,14 @@ impl App {
             status: AppStatus::Idle,
             should_quit: false,
             tool_events: Vec::new(),
-            yolo_mode: false,
+            yolo_mode,
+            approval_mode: None,
             multimodal,
             attachments: Vec::new(),
             streaming_reply: String::new(),
             store,
             runner,
+            registry,
             session_ctx,
             working_dir,
             stream_rx: None,
@@ -178,6 +208,24 @@ impl App {
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+
+        // 审批模式下只响应 y/n（以及 Ctrl+C 中断），其余按键忽略
+        if self.approval_mode.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.answer_approval(true),
+                KeyCode::Char('n') | KeyCode::Char('N') => self.answer_approval(false),
+                KeyCode::Char('c')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && self.status == AppStatus::Streaming =>
+                {
+                    if let Some(abort) = self.stream_abort.take() {
+                        abort.abort();
+                    }
+                }
+                _ => {}
+            }
             return Ok(());
         }
 
@@ -248,6 +296,20 @@ impl App {
         Ok(())
     }
 
+    /// 用户对待审批工具做出决定：发送响应并退出审批模式。
+    fn answer_approval(&mut self, approved: bool) {
+        if let Some(pending) = self.approval_mode.take() {
+            let _ = pending.respond.send(approved);
+            let msg = if approved {
+                format!("已批准执行工具 {}", pending.name)
+            } else {
+                format!("已拒绝执行工具 {}", pending.name)
+            };
+            self.chat
+                .push_message(system_message(&self.session_id, &msg));
+        }
+    }
+
     async fn try_handle_pasted_media_path(&mut self) -> Result<bool> {
         let text = self.input.text();
         let trimmed = text.trim();
@@ -311,11 +373,24 @@ impl App {
             }
             "/yolo" => {
                 self.yolo_mode = !self.yolo_mode;
+                let configured = {
+                    let mut registry = self.registry.lock().await;
+                    let mut ctx = registry.context().clone();
+                    if let Some(permissions) = ctx.permissions.as_mut() {
+                        permissions.yolo = self.yolo_mode;
+                        registry.set_context(ctx);
+                        true
+                    } else {
+                        false
+                    }
+                };
                 let status = if self.yolo_mode { "开启" } else { "关闭" };
-                self.chat.push_message(system_message(
-                    &self.session_id,
-                    &format!("YOLO 模式已{}", status),
-                ));
+                let mut msg = format!("YOLO 模式已{}", status);
+                if !configured {
+                    msg.push_str("\n（未配置 [permissions]，当前所有工具均无需审批）");
+                }
+                self.chat
+                    .push_message(system_message(&self.session_id, &msg));
             }
             "/sessions" => {
                 let content = match self.store.list_sessions().await {
@@ -456,12 +531,13 @@ impl App {
         self.stream_rx = Some(stream_rx);
 
         let ctx = self.session_ctx.clone();
-        let runner = self.runner.clone();
         let text_clone = text.clone();
 
         // 先创建实际的 LLM runner task，以便把 AbortHandle 交给主循环
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<RunnerEvent>();
         let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<StreamChunk>();
+        let (approval_tx, mut approval_rx) = mpsc::unbounded_channel::<ApprovalRequest>();
+        let runner = self.runner.clone().with_approval_tx(approval_tx);
         let stream_handle = tokio::spawn(async move {
             runner
                 .run_stream(ctx, &text_clone, chunk_tx, Some(event_tx))
@@ -477,6 +553,13 @@ impl App {
                     }
                     Some(event) = event_rx.recv() => {
                         let _ = stream_tx.send(StreamEvent::ToolEvent(event));
+                    }
+                    Some(req) = approval_rx.recv() => {
+                        let _ = stream_tx.send(StreamEvent::ApprovalRequired {
+                            name: req.name,
+                            arguments: req.arguments,
+                            respond: req.respond,
+                        });
                     }
                     else => break,
                 }
@@ -528,8 +611,24 @@ impl App {
                     .await?;
                 self.chat.push_message(tool_msg);
             }
+            StreamEvent::ApprovalRequired {
+                name,
+                arguments,
+                respond,
+            } => {
+                let args = format_tool_arguments(&name, &arguments);
+                let prompt = format!("[tool] approve {}? (y/n)\n参数: {}", name, args);
+                self.chat
+                    .push_message(system_message(&self.session_id, &prompt));
+                self.approval_mode = Some(PendingApproval {
+                    name,
+                    arguments,
+                    respond,
+                });
+            }
             StreamEvent::Done(result) => {
                 self.stream_abort = None;
+                self.approval_mode = None;
                 if self.streaming_message_added {
                     self.chat.pop_last();
                 }
@@ -603,19 +702,23 @@ impl App {
             chunks[1].y + cursor_y,
         ));
 
-        let status_text = match &self.status {
-            AppStatus::Idle => {
-                if self.tool_events.is_empty() {
-                    "就绪 | /exit 退出 | Enter 发送 | Shift+Enter 换行 | Shift+↑/↓ 滚动聊天"
-                        .to_string()
-                } else {
-                    format!("最近工具调用: {} 次", self.tool_events.len())
+        let status_text = if let Some(pending) = &self.approval_mode {
+            format!("[tool] approve {}? (y/n)", pending.name)
+        } else {
+            match &self.status {
+                AppStatus::Idle => {
+                    if self.tool_events.is_empty() {
+                        "就绪 | /exit 退出 | Enter 发送 | Shift+Enter 换行 | Shift+↑/↓ 滚动聊天"
+                            .to_string()
+                    } else {
+                        format!("最近工具调用: {} 次", self.tool_events.len())
+                    }
                 }
+                AppStatus::Streaming => {
+                    format!("{} 思考中...", spinner_char(self.spinner_frame))
+                }
+                AppStatus::Error(e) => format!("错误: {}", e),
             }
-            AppStatus::Streaming => {
-                format!("{} 思考中...", spinner_char(self.spinner_frame))
-            }
-            AppStatus::Error(e) => format!("错误: {}", e),
         };
         let status =
             Paragraph::new(Line::from(status_text)).style(Style::default().fg(Color::Gray));
@@ -886,6 +989,7 @@ mod tests {
         let client: Arc<dyn LlmClient> = Arc::new(FakeLlm);
         let mut registry = ToolRegistry::new(ToolContext {
             working_dir: dir.path().to_path_buf(),
+            ..Default::default()
         });
         registry.register(Arc::new(FakeTool));
         let app = App::new(
@@ -906,6 +1010,7 @@ mod tests {
         let client: Arc<dyn LlmClient> = Arc::new(FakeLlm);
         let mut registry = ToolRegistry::new(ToolContext {
             working_dir: dir.path().to_path_buf(),
+            ..Default::default()
         });
         registry.register(Arc::new(FakeTool));
         let multimodal = MultimodalConfig {
@@ -947,6 +1052,7 @@ mod tests {
         let client: Arc<dyn LlmClient> = Arc::new(FakeLlm);
         let mut registry = ToolRegistry::new(ToolContext {
             working_dir: dir.path().to_path_buf(),
+            ..Default::default()
         });
         registry.register(Arc::new(FakeTool));
         let app = App::load_session(
@@ -979,6 +1085,7 @@ mod tests {
         });
         let registry = ToolRegistry::new(ToolContext {
             working_dir: dir.path().to_path_buf(),
+            ..Default::default()
         });
         let mut app = App::new(
             store,
@@ -1051,6 +1158,7 @@ mod tests {
         let client: Arc<dyn LlmClient> = Arc::new(SlowStreamingFakeLlm);
         let registry = ToolRegistry::new(ToolContext {
             working_dir: dir.path().to_path_buf(),
+            ..Default::default()
         });
         let mut app = App::new(
             store,
@@ -1160,6 +1268,276 @@ mod tests {
         assert!(!app.yolo_mode);
     }
 
+    // ---- 工具审批 ----
+
+    use crate::agent::llm::{FunctionCall, ToolCall};
+    use crate::config::PermissionConfig;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct QueueFakeLlm {
+        responses: Mutex<Vec<LlmResponse>>,
+    }
+
+    #[async_trait]
+    impl LlmClient for QueueFakeLlm {
+        async fn chat(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<LlmResponse> {
+            let mut responses = self.responses.lock().await;
+            Ok(responses.remove(0))
+        }
+    }
+
+    struct CountingTool {
+        count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for CountingTool {
+        fn name(&self) -> &str {
+            "counted"
+        }
+        fn description(&self) -> &str {
+            "counted"
+        }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new("counted", "counted")
+        }
+        async fn execute(
+            &self,
+            _args: HashMap<String, Value>,
+            _ctx: &ToolContext,
+        ) -> Result<ToolResult> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolResult::Text("counted done".to_string()))
+        }
+    }
+
+    /// 构造一个会触发 counted 工具调用的 App：计划 -> 工具调用 -> 步骤完成 -> 总结。
+    async fn create_approval_app(
+        permissions: Option<PermissionConfig>,
+    ) -> (App, TempDir, Arc<AtomicUsize>) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("app.db");
+        let store = Store::open(&path).await.unwrap();
+        let client: Arc<dyn LlmClient> = Arc::new(QueueFakeLlm {
+            responses: Mutex::new(vec![
+                LlmResponse::Text(r#"["调用工具"]"#.to_string()),
+                LlmResponse::ToolCalls(vec![ToolCall {
+                    id: "1".to_string(),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "counted".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                LlmResponse::Text("step done".to_string()),
+                LlmResponse::Text("最终回复".to_string()),
+            ]),
+        });
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new(ToolContext {
+            working_dir: dir.path().to_path_buf(),
+            permissions,
+        });
+        registry.register(Arc::new(CountingTool {
+            count: count.clone(),
+        }));
+        let app = App::new(
+            store,
+            client,
+            Arc::new(Mutex::new(registry)),
+            MultimodalConfig::default(),
+        )
+        .await
+        .unwrap();
+        (app, dir, count)
+    }
+
+    /// 处理流事件直到结束；遇到审批请求时按给定决定应答。
+    async fn press_enter_with_approval(app: &mut App, approved: bool) {
+        app.handle_key(KeyEvent::from(KeyCode::Enter))
+            .await
+            .unwrap();
+        loop {
+            let event = {
+                let Some(rx) = app.stream_rx.as_mut() else {
+                    break;
+                };
+                match rx.recv().await {
+                    Some(e) => e,
+                    None => break,
+                }
+            };
+            let is_done = matches!(event, StreamEvent::Done(_));
+            app.handle_stream_event(event).await.unwrap();
+            if app.approval_mode.is_some() {
+                app.answer_approval(approved);
+            }
+            if is_done {
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_approval_accepted() {
+        let (mut app, _dir, count) = create_approval_app(Some(PermissionConfig::default())).await;
+        type_text(&mut app, "hi").await;
+        press_enter_with_approval(&mut app, true).await;
+
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert!(app.approval_mode.is_none());
+        assert_eq!(app.status, AppStatus::Idle);
+        assert!(
+            app.chat
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("[tool] approve counted? (y/n)"))
+        );
+        assert!(
+            app.chat
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("已批准执行工具 counted"))
+        );
+        let messages = app.store.list_messages(&app.session_id).await.unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.role == "tool" && m.content.contains("counted done"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_approval_rejected() {
+        let (mut app, _dir, count) = create_approval_app(Some(PermissionConfig::default())).await;
+        type_text(&mut app, "hi").await;
+        press_enter_with_approval(&mut app, false).await;
+
+        // 工具未被执行，且模型收到拒绝提示
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        assert!(app.approval_mode.is_none());
+        assert!(
+            app.chat
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("已拒绝执行工具 counted"))
+        );
+        let messages = app.store.list_messages(&app.session_id).await.unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.role == "tool" && m.content.contains("用户拒绝执行该工具"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_runs_without_approval_when_permissions_absent() {
+        let (mut app, _dir, count) = create_approval_app(None).await;
+        type_text(&mut app, "hi").await;
+        press_enter(&mut app).await;
+
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert!(app.approval_mode.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_tool_auto_approved_in_yolo_mode() {
+        let (mut app, _dir, count) = create_approval_app(Some(PermissionConfig {
+            yolo: true,
+            ..Default::default()
+        }))
+        .await;
+        // 初始 yolo_mode 从配置读取
+        assert!(app.yolo_mode);
+        type_text(&mut app, "hi").await;
+        press_enter(&mut app).await;
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_tool_in_auto_approve_list_skips_approval() {
+        let (mut app, _dir, count) = create_approval_app(Some(PermissionConfig {
+            yolo: false,
+            auto_approve: vec!["counted".to_string()],
+        }))
+        .await;
+        type_text(&mut app, "hi").await;
+        press_enter(&mut app).await;
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert!(app.approval_mode.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_yolo_command_syncs_permissions() {
+        let (mut app, _dir, _count) = create_approval_app(Some(PermissionConfig::default())).await;
+        assert!(!app.yolo_mode);
+
+        type_text(&mut app, "/yolo").await;
+        press_enter(&mut app).await;
+        assert!(app.yolo_mode);
+        {
+            let registry = app.registry.lock().await;
+            assert!(registry.context().permissions.as_ref().unwrap().yolo);
+        }
+
+        type_text(&mut app, "/yolo").await;
+        press_enter(&mut app).await;
+        assert!(!app.yolo_mode);
+        let registry = app.registry.lock().await;
+        assert!(!registry.context().permissions.as_ref().unwrap().yolo);
+    }
+
+    #[tokio::test]
+    async fn test_approval_key_handling() {
+        let (mut app, _dir, _count) = create_approval_app(Some(PermissionConfig::default())).await;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.approval_mode = Some(PendingApproval {
+            name: "fs_write".to_string(),
+            arguments: serde_json::json!({}),
+            respond: tx,
+        });
+
+        // 非 y/n 按键被忽略，不进入输入框
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')))
+            .await
+            .unwrap();
+        assert!(app.approval_mode.is_some());
+        assert!(app.input.is_empty());
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('n')))
+            .await
+            .unwrap();
+        assert!(app.approval_mode.is_none());
+        assert_eq!(rx.await, Ok(false));
+        assert!(
+            app.chat
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("已拒绝执行工具 fs_write"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_draw_shows_approval_prompt() {
+        let (mut app, _dir, _count) = create_approval_app(Some(PermissionConfig::default())).await;
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        app.approval_mode = Some(PendingApproval {
+            name: "fs_write".to_string(),
+            arguments: serde_json::json!({}),
+            respond: tx,
+        });
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let content: String = buffer.content.iter().map(|c| c.symbol()).collect();
+        assert!(content.contains("[tool] approve fs_write? (y/n)"));
+    }
+
     #[tokio::test]
     async fn test_handle_key_sessions_command() {
         let (mut app, _dir) = create_test_app().await;
@@ -1218,6 +1596,7 @@ mod tests {
         });
         let registry = ToolRegistry::new(ToolContext {
             working_dir: dir.path().to_path_buf(),
+            ..Default::default()
         });
         let mut app = App::new(
             store,
@@ -1256,6 +1635,7 @@ mod tests {
         });
         let registry = ToolRegistry::new(ToolContext {
             working_dir: dir.path().to_path_buf(),
+            ..Default::default()
         });
         let mut app = App::new(
             store,

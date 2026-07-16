@@ -152,6 +152,8 @@ impl ToolSchema {
 #[derive(Debug, Clone, Default)]
 pub struct ToolContext {
     pub working_dir: std::path::PathBuf,
+    /// 工具审批配置；None 表示不启用审批（保持旧行为）。
+    pub permissions: Option<crate::config::PermissionConfig>,
 }
 
 /// 工具执行结果

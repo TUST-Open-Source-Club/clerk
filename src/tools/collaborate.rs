@@ -87,7 +87,8 @@ impl Tool for CollaborateParallelTool {
     }
 
     fn description(&self) -> &str {
-        "并行创建多个子 Agent 分别执行任务，并汇总结果。"
+        "并行创建多个子 Agent 分别执行任务，并汇总结果。\
+         各子 Agent 独立运行，单个失败不影响其余，结果以 JSON 对象按 name 汇总。"
     }
 
     fn schema(&self) -> ToolSchema {
@@ -96,6 +97,11 @@ impl Tool for CollaborateParallelTool {
                 "agents",
                 "子 Agent 列表 JSON 数组，每项包含 name/system_prompt/task/allowed_tools",
                 true,
+            )
+            .with_string(
+                "context",
+                "所有子 Agent 共享的背景/任务描述（可选），会拼接到每个 agent 的任务前",
+                false,
             )
             .with_integer("max_iterations", "最大迭代次数（默认 10）", false)
     }
@@ -107,33 +113,74 @@ impl Tool for CollaborateParallelTool {
     ) -> anyhow::Result<ToolResult> {
         let specs = parse_agent_specs(&args)?;
         let max_iterations = get_i64(&args, "max_iterations", 10) as usize;
+        let shared_context = args
+            .get("context")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string());
 
         let mut handles = Vec::new();
         for spec in specs {
+            let name = spec.name.clone();
             let manager = self.manager.clone();
-            handles.push(tokio::spawn(async move {
+            let context = shared_context.clone();
+            let handle = tokio::spawn(async move {
+                let task = match &context {
+                    Some(c) => format!("共享背景：\n{}\n\n任务：\n{}", c, spec.task),
+                    None => spec.task,
+                };
                 manager
                     .create_and_run(
                         spec.name,
                         spec.system_prompt,
                         spec.allowed_tools,
-                        &spec.task,
+                        &task,
                         max_iterations,
                     )
                     .await
-            }));
+            });
+            handles.push((name, handle));
         }
 
-        let mut results = Vec::new();
-        for handle in handles {
-            let result = handle.await??;
-            results.push(serde_json::json!({
-                "output": result.output,
-                "tool_calls": result.tool_calls.len(),
-            }));
+        // 逐个收集结果：单个子 Agent 失败（或任务 panic/取消）只标记该 Agent，
+        // 不影响其余 Agent 的结果汇总。
+        let mut results = serde_json::Map::new();
+        for (name, handle) in handles {
+            let key = unique_key(&results, &name);
+            let entry = match handle.await {
+                Ok(Ok(result)) => serde_json::json!({
+                    "status": "ok",
+                    "result": result.output,
+                    "tool_calls": result.tool_calls.len(),
+                }),
+                Ok(Err(e)) => serde_json::json!({
+                    "status": "error",
+                    "error": format!("{:#}", e),
+                }),
+                Err(e) => serde_json::json!({
+                    "status": "error",
+                    "error": format!("子 Agent 任务异常终止: {}", e),
+                }),
+            };
+            results.insert(key, entry);
         }
 
-        Ok(ToolResult::Json(Value::Array(results)))
+        Ok(ToolResult::Json(Value::Object(results)))
+    }
+}
+
+/// 生成不重复的结果 key：name 冲突时追加 -2、-3 等后缀。
+fn unique_key(map: &serde_json::Map<String, Value>, name: &str) -> String {
+    if !map.contains_key(name) {
+        return name.to_string();
+    }
+    let mut i = 2;
+    loop {
+        let candidate = format!("{}-{}", name, i);
+        if !map.contains_key(&candidate) {
+            return candidate;
+        }
+        i += 1;
     }
 }
 
@@ -270,6 +317,50 @@ mod tests {
         Arc::new(SubagentManager::new(client, registry))
     }
 
+    /// 根据任务内容决定行为的 LLM：消息中包含 "boom" 时模拟调用失败。
+    struct TaskAwareFakeLlm;
+
+    #[async_trait]
+    impl crate::agent::llm::LlmClient for TaskAwareFakeLlm {
+        async fn chat(
+            &self,
+            messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+        ) -> anyhow::Result<LlmResponse> {
+            let combined: String = messages.iter().map(|m| m.content.clone()).collect();
+            if combined.contains("boom") {
+                anyhow::bail!("模拟 LLM 调用失败");
+            }
+            Ok(LlmResponse::Text("ok".to_string()))
+        }
+    }
+
+    /// 记录所有收到的消息内容，用于验证共享 context 是否传递给子 Agent。
+    struct RecordingFakeLlm {
+        seen: Arc<tokio::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl crate::agent::llm::LlmClient for RecordingFakeLlm {
+        async fn chat(
+            &self,
+            messages: Vec<Message>,
+            _tools: Vec<ToolDefinition>,
+        ) -> anyhow::Result<LlmResponse> {
+            let mut seen = self.seen.lock().await;
+            for m in &messages {
+                seen.push(m.content.clone());
+            }
+            Ok(LlmResponse::Text("ok".to_string()))
+        }
+    }
+
+    fn manager_with_client(client: Arc<dyn crate::agent::llm::LlmClient>) -> Arc<SubagentManager> {
+        let mut registry = ToolRegistry::new(ToolContext::default());
+        registry.register(Arc::new(FakeTool));
+        Arc::new(SubagentManager::new(client, registry))
+    }
+
     #[tokio::test]
     async fn test_collaborate_parallel() {
         let tool = CollaborateParallelTool::new(make_manager());
@@ -283,8 +374,79 @@ mod tests {
         );
 
         let result = tool.execute(args, &ToolContext::default()).await.unwrap();
-        let text = result.to_string_for_model();
-        assert!(text.contains("first") || text.contains("second"));
+        let ToolResult::Json(Value::Object(map)) = &result else {
+            panic!("结果应为 JSON 对象");
+        };
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("a"));
+        assert!(map.contains_key("b"));
+        for entry in map.values() {
+            assert_eq!(entry["status"], "ok");
+            assert!(entry["result"].is_string());
+            assert!(entry["tool_calls"].is_number());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collaborate_parallel_partial_failure() {
+        let tool = CollaborateParallelTool::new(manager_with_client(Arc::new(TaskAwareFakeLlm)));
+        let mut args = HashMap::new();
+        args.insert(
+            "agents".to_string(),
+            Value::Array(vec![
+                serde_json::json!({"name": "good", "task": "正常任务"}),
+                serde_json::json!({"name": "bad", "task": "boom 任务"}),
+            ]),
+        );
+
+        // 单个 agent 失败不应导致整个工具失败
+        let result = tool.execute(args, &ToolContext::default()).await.unwrap();
+        let ToolResult::Json(Value::Object(map)) = &result else {
+            panic!("结果应为 JSON 对象");
+        };
+        assert_eq!(map["good"]["status"], "ok");
+        assert_eq!(map["good"]["result"], "ok");
+        assert_eq!(map["bad"]["status"], "error");
+        assert!(
+            map["bad"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("模拟 LLM 调用失败")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collaborate_parallel_shared_context() {
+        let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let tool = CollaborateParallelTool::new(manager_with_client(Arc::new(RecordingFakeLlm {
+            seen: seen.clone(),
+        })));
+        let mut args = HashMap::new();
+        args.insert(
+            "agents".to_string(),
+            Value::Array(vec![
+                serde_json::json!({"name": "a", "task": "t1"}),
+                serde_json::json!({"name": "b", "task": "t2"}),
+            ]),
+        );
+        args.insert(
+            "context".to_string(),
+            Value::String("共享背景信息-XYZ".to_string()),
+        );
+
+        let result = tool.execute(args, &ToolContext::default()).await.unwrap();
+        let ToolResult::Json(Value::Object(map)) = &result else {
+            panic!("结果应为 JSON 对象");
+        };
+        assert_eq!(map.len(), 2);
+
+        // 两个子 Agent 都应在其消息中看到共享 context
+        let seen = seen.lock().await;
+        let hits = seen
+            .iter()
+            .filter(|c| c.contains("共享背景信息-XYZ"))
+            .count();
+        assert!(hits >= 2, "两个子 Agent 都应看到共享 context");
     }
 
     #[tokio::test]

@@ -43,6 +43,15 @@ impl ToolRegistry {
         &self.context
     }
 
+    /// 判断指定工具执行前是否需要用户审批。
+    /// 未配置 permissions 时一律不需要审批（向后兼容）。
+    pub fn requires_approval(&self, name: &str) -> bool {
+        self.context
+            .permissions
+            .as_ref()
+            .is_some_and(|p| p.requires_approval(name))
+    }
+
     pub fn set_context(&mut self, context: ToolContext) {
         self.context = context;
     }
@@ -141,6 +150,7 @@ mod tests {
 
         let new_ctx = ToolContext {
             working_dir: std::path::PathBuf::from("/tmp"),
+            permissions: None,
         };
         registry.set_context(new_ctx.clone());
         assert_eq!(registry.context().working_dir, new_ctx.working_dir);
@@ -148,5 +158,30 @@ mod tests {
         registry.remove("echo");
         assert!(registry.names().is_empty());
         assert!(registry.execute("echo", HashMap::new()).await.is_err());
+    }
+
+    #[test]
+    fn test_requires_approval_without_permissions() {
+        let registry = ToolRegistry::new(ToolContext::default());
+        assert!(!registry.requires_approval("shell"));
+    }
+
+    #[test]
+    fn test_requires_approval_with_permissions() {
+        let registry = ToolRegistry::new(ToolContext {
+            permissions: Some(crate::config::PermissionConfig::default()),
+            ..Default::default()
+        });
+        assert!(!registry.requires_approval("fs_read"));
+        assert!(registry.requires_approval("shell"));
+
+        let yolo_registry = ToolRegistry::new(ToolContext {
+            permissions: Some(crate::config::PermissionConfig {
+                yolo: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert!(!yolo_registry.requires_approval("shell"));
     }
 }
