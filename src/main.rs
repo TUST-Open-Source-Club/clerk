@@ -1,13 +1,6 @@
-mod agent;
 mod app;
 mod cli;
-mod config;
-mod mcp;
-mod skills;
-mod store;
-mod tools;
 mod ui;
-mod util;
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -22,24 +15,12 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
-use crate::agent::llm::OpenAiClient;
-use crate::agent::runner::PlanExecuteRunner;
-use crate::agent::session::SessionContext;
-use crate::agent::subagent_manager::SubagentManager;
+use clerk_core::bootstrap::{create_llm_client, create_tool_registry};
+use clerk_core::config::Config;
+use clerk_core::store::Store;
+use clerk_core::util::expand_tilde;
+
 use crate::app::App;
-use crate::config::Config;
-use crate::store::Store;
-use crate::tools::collaborate::{CollaborateParallelTool, CollaborateSequentialTool};
-use crate::tools::media::ReadMediaFile;
-use crate::tools::registry::ToolRegistry;
-use crate::tools::render_image::RenderToImage;
-use crate::tools::schema::ToolContext;
-use crate::tools::subagent::{
-    SubagentCreateTool, SubagentDeleteTool, SubagentListTool, SubagentRunTool,
-};
-use crate::tools::write_skill::WriteSkillTool;
-use crate::tools::{browser, fs, office, pdf, poster, shell, web};
-use crate::util::expand_tilde;
 
 /// 初始化日志：按 RUST_LOG 环境变量过滤，写入数据目录下的 clerk.log。
 fn setup_logging() -> Result<()> {
@@ -62,52 +43,6 @@ fn setup_logging() -> Result<()> {
         .with_writer(non_blocking)
         .init();
     Ok(())
-}
-
-/// 创建工具注册表：注册全部本地工具，再基于共享的 SubagentManager 注册子 Agent 与协作工具。
-fn create_tool_registry(
-    working_dir: &std::path::Path,
-    client: Arc<dyn crate::agent::llm::LlmClient>,
-    permissions: Option<crate::config::PermissionConfig>,
-) -> ToolRegistry {
-    let mut registry = ToolRegistry::new(ToolContext {
-        working_dir: working_dir.to_path_buf(),
-        permissions,
-    });
-    registry.register(Arc::new(fs::ReadFileTool));
-    registry.register(Arc::new(fs::WriteFileTool));
-    registry.register(Arc::new(fs::ListDirTool));
-    registry.register(Arc::new(shell::ShellTool));
-    registry.register(Arc::new(web::WebFetchTool));
-    registry.register(Arc::new(web::WebPostTool));
-    registry.register(Arc::new(browser::BrowserTool::new()));
-    registry.register(Arc::new(office::ReadExcelTool));
-    registry.register(Arc::new(office::WriteExcelTool));
-    registry.register(Arc::new(office::ReadWordTool));
-    registry.register(Arc::new(office::WriteWordTool));
-    registry.register(Arc::new(office::RenderOfficeTool));
-    registry.register(Arc::new(pdf::MergePdfTool));
-    registry.register(Arc::new(pdf::SplitPdfTool));
-    registry.register(Arc::new(poster::PosterTool));
-    registry.register(Arc::new(ReadMediaFile));
-    registry.register(Arc::new(RenderToImage));
-
-    let manager = Arc::new(SubagentManager::new(client, registry.clone()));
-    registry.register(Arc::new(SubagentCreateTool::new(manager.clone())));
-    registry.register(Arc::new(SubagentRunTool::new(manager.clone())));
-    registry.register(Arc::new(SubagentListTool::new(manager.clone())));
-    registry.register(Arc::new(SubagentDeleteTool::new(manager.clone())));
-    registry.register(Arc::new(CollaborateParallelTool::new(manager.clone())));
-    registry.register(Arc::new(CollaborateSequentialTool::new(manager.clone())));
-    registry.register(Arc::new(WriteSkillTool::new()));
-
-    registry
-}
-
-/// 按配置创建 OpenAI 兼容 LLM 客户端。
-fn create_llm_client(config: &Config) -> Result<Arc<dyn crate::agent::llm::LlmClient>> {
-    let client = OpenAiClient::from_config(&config.llm)?;
-    Ok(Arc::new(client))
 }
 
 /// 读取一行输入并去掉末尾换行符。
@@ -257,8 +192,10 @@ async fn run_app() -> Result<()> {
         store.create_session(&session_id, Some("命令会话")).await?;
         store.add_message(&session_id, "user", &command).await?;
 
-        let runner = PlanExecuteRunner::new(client, registry);
-        let mut ctx = SessionContext::new(build_system_prompt());
+        let runner = clerk_core::agent::runner::PlanExecuteRunner::new(client, registry);
+        let mut ctx = clerk_core::agent::session::SessionContext::new(
+            clerk_core::prompt::build_system_prompt(),
+        );
         let reply = runner.run(&mut ctx, &command, None).await?;
 
         store.add_message(&session_id, "assistant", &reply).await?;
@@ -277,31 +214,6 @@ async fn run_app() -> Result<()> {
 
     restore_terminal(&mut terminal)?;
     result
-}
-
-/// 构造系统提示词：说明 Plan-Execute 工作方式与可用工具清单。
-fn build_system_prompt() -> String {
-    r#"你是一个 Plan-Execute 办公 Agent，名为 Clerk。你会先为用户请求制定执行计划，然后逐步执行，最后总结结果。
-你可以使用以下工具帮助用户：
-- fs_read: 读取文件内容
-- fs_write: 写入文件内容
-- fs_list: 列出目录内容
-- shell: 执行 shell 命令
-- web_fetch: 获取网页内容
-- web_post: 发送 POST 请求
-- browser: 使用无头 Chromium 浏览器操作网页、生成 PDF/截图
-- office_read_excel / office_write_excel: Excel 读写
-- office_read_word / office_write_word: Word 读写
-- office_render: 使用 Pandoc 渲染复杂 Word/PDF/PPT（支持模板、公式、图片）
-- pdf_merge / pdf_split: PDF 合并与拆分
-- poster: HTML 转海报 PDF/PNG
-- read_media_file: 读取图片/视频文件并返回 base64 数据 URL
-- render_to_image: 将 HTML/PDF/Office/图片渲染为 PNG 预览图
-- subagent_create / subagent_run / subagent_list / subagent_delete: 创建并运行子 Agent
-- collaborate_parallel / collaborate_sequential: 多子 Agent 并行/顺序协作
-- write_skill: 将领域知识保存为 SKILL.md，供后续复用
-请根据用户需求制定计划、逐步执行，并简洁地总结结果。"#
-        .to_string()
 }
 
 /// 恢复终端状态：关闭 raw mode、退出备用屏幕并显示光标。
@@ -345,58 +257,9 @@ mod tests {
 
     #[test]
     fn test_generate_example_config() {
-        let example = config::generate_example_config();
+        let example = clerk_core::config::generate_example_config();
         assert!(example.contains("[llm]"));
         assert!(example.contains("api_key"));
-    }
-
-    #[test]
-    fn test_create_tool_registry() {
-        let client: Arc<dyn crate::agent::llm::LlmClient> = Arc::new(FakeLlm);
-        let registry = create_tool_registry(std::path::Path::new("/tmp"), client, None);
-        let names = registry.names();
-        assert!(names.contains(&"fs_read".to_string()));
-        assert!(names.contains(&"shell".to_string()));
-        assert!(names.contains(&"subagent_create".to_string()));
-        assert!(names.contains(&"collaborate_parallel".to_string()));
-        assert!(names.contains(&"write_skill".to_string()));
-        assert!(names.contains(&"read_media_file".to_string()));
-        assert!(names.contains(&"render_to_image".to_string()));
-        // 未配置 permissions 时不需要审批（向后兼容）
-        assert!(!registry.requires_approval("shell"));
-    }
-
-    #[test]
-    fn test_all_tools_have_valid_schema() {
-        let client: Arc<dyn crate::agent::llm::LlmClient> = Arc::new(FakeLlm);
-        let registry = create_tool_registry(std::path::Path::new("/tmp"), client, None);
-        for name in registry.names() {
-            let tool = registry.get(&name).unwrap();
-            assert_eq!(tool.name(), name);
-            assert!(!tool.description().is_empty());
-            let schema = tool.schema();
-            assert_eq!(schema.name, name);
-            let _ = schema.into_tool_definition();
-        }
-    }
-
-    #[test]
-    fn test_build_system_prompt_contains_tools() {
-        let prompt = build_system_prompt();
-        assert!(prompt.contains("subagent_create"));
-        assert!(prompt.contains("collaborate_parallel"));
-        assert!(prompt.contains("write_skill"));
-        assert!(prompt.contains("read_media_file"));
-        assert!(prompt.contains("render_to_image"));
-    }
-
-    #[test]
-    fn test_create_llm_client() {
-        let mut config = Config::default();
-        config.llm.api_key = "sk-test".to_string();
-        let client = create_llm_client(&config).unwrap();
-        // 仅验证创建成功即可
-        drop(client);
     }
 
     #[test]
@@ -458,18 +321,5 @@ mod tests {
         assert!(!parse_yes_no("n"));
         assert!(!parse_yes_no(""));
         assert!(!parse_yes_no("no"));
-    }
-
-    struct FakeLlm;
-
-    #[async_trait::async_trait]
-    impl crate::agent::llm::LlmClient for FakeLlm {
-        async fn chat(
-            &self,
-            _messages: Vec<crate::agent::llm::Message>,
-            _tools: Vec<crate::agent::llm::ToolDefinition>,
-        ) -> anyhow::Result<crate::agent::llm::LlmResponse> {
-            Ok(crate::agent::llm::LlmResponse::Text("ok".to_string()))
-        }
     }
 }

@@ -5,3 +5,4 @@ config.toml
 ~*.preview.png
 clerk_poster.html
 ~
+.clerk-attachments/

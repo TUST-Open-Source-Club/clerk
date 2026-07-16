@@ -109,14 +109,32 @@ clerk -x "把 a.xlsx 的销售额汇总并写入 summary.docx"
 
 ## 架构概览
 
-- `src/ui/`：TUI 组件（聊天面板、输入区、Markdown 渲染）
-- `src/agent/`：Agent 编排与 LLM 适配（Plan-Execute runner、会话上下文、子 Agent 及其管理器、OpenAI 兼容客户端）
-- `src/tools/`：本地工具实现与注册表（Office/PDF/海报/浏览器/shell/fs/web/媒体/渲染/协作/skill）
-- `src/mcp/`：MCP 客户端（JSON-RPC 类型、stdio/SSE 传输）
-- `src/skills/`：Skills 系统（SKILL.md 解析、加载、相关性注入、写入）
-- `src/store/`：SQLite 会话与消息持久化
-- `src/app.rs`：TUI 主事件循环（键盘处理、流式输出、审批交互）
-- `src/main.rs`：启动入口（配置加载/向导、工具注册、交互与非交互模式分发）
+本仓库是 Cargo workspace：
+
+- `crates/clerk-core/`：核心库，TUI 与 GUI 共享
+  - `agent/`：Agent 编排与 LLM 适配（Plan-Execute runner、会话上下文、子 Agent 及其管理器、OpenAI 兼容客户端）
+  - `tools/`：本地工具实现与注册表（Office/PDF/海报/浏览器/shell/fs/web/媒体/渲染/协作/skill）
+  - `mcp/`：MCP 客户端（JSON-RPC 类型、stdio/SSE 传输）
+  - `skills/`：Skills 系统（SKILL.md 解析、加载、相关性注入、写入）
+  - `store/`：SQLite 会话与消息持久化
+  - `config.rs` / `bootstrap.rs` / `prompt.rs` / `text.rs` / `media.rs`：配置、启动装配、系统提示词、事件格式化与附件处理
+- `src/`：TUI 二进制（`clerk`）
+  - `ui/`：TUI 组件（聊天面板、输入区、Markdown 渲染）
+  - `app.rs`：TUI 主事件循环（键盘处理、流式输出、审批交互）
+  - `main.rs`：启动入口（配置加载/向导、交互与非交互模式分发）
+- `crates/clerk-gui/`：Tauri 2.x 桌面 GUI
+  - `src/lib.rs`：Tauri 命令（send_message/get_history/attach_media/save_file/save_file_as/respond_approval）与事件桥接
+  - `ui/`：纯 HTML/JS/CSS 前端（无打包工具，经 `withGlobalTauri` 调用后端）
+
+## GUI（Tauri）
+
+```bash
+cargo run --release --package clerk-gui
+```
+
+GUI 与 TUI 使用同一份 `config.toml`。支持流式回复与思考内容展示、
+粘贴图片/视频作为附件、工具审批弹窗，以及产出文件（Office/PDF/海报等）的
+“保存 / 另存为”文件卡片。
 
 ## 许可证
 

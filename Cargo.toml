@@ -6,41 +6,29 @@ description = "A terminal-based office AI agent built with Rust"
 license = "GPL-3.0"
 repository = "https://github.com/TUST-Open-Source-Club/clerk"
 
+[workspace]
+resolver = "3"
+members = ["crates/clerk-core", "crates/clerk-gui"]
+
 [dependencies]
+clerk-core = { path = "crates/clerk-core" }
 tokio = { version = "1.44", features = ["full"] }
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 clap = { version = "4.5", features = ["derive"] }
-serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
-toml = "0.8"
 anyhow = "1.0"
-thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.16", features = ["v4"] }
 async-trait = "0.1"
-async-openai = "0.28"
-chromiumoxide = "0.7"
-futures-util = "0.3"
 tokio-stream = "0.1"
-calamine = "0.26"
-rust_xlsxwriter = "0.84"
-docx-rs = "0.4"
-lopdf = "0.36"
 unicode-width = "0.2"
 unicode-segmentation = "1.12"
-directories = "6.0"
-image = "0.25"
-base64 = "0.22"
-infer = "0.16"
 tracing-appender = { version = "0.2.5", default-features = false }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 
 [dev-dependencies]
 tempfile = "3.14"
-wiremock = "0.6"
+image = "0.25"

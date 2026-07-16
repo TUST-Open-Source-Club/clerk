@@ -6,8 +6,8 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
 
-use crate::store::Message;
 use crate::ui::markdown::markdown_to_text;
+use clerk_core::store::Message;
 
 /// 聊天面板：按角色着色渲染消息列表，支持滚动。
 pub struct ChatPanel {

@@ -11,6 +11,12 @@ pub struct BrowserTool {
     // 浏览器实例由每次调用时按需创建，避免长期占用资源
 }
 
+impl Default for BrowserTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BrowserTool {
     pub fn new() -> Self {
         Self {}

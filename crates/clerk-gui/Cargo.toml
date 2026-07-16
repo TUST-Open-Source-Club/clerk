@@ -1,0 +1,24 @@
+[package]
+name = "clerk-gui"
+version = "0.1.0"
+edition = "2024"
+description = "Clerk 桌面 GUI（Tauri 2.x），与 TUI 共享 clerk-core"
+license = "GPL-3.0"
+repository = "https://github.com/TUST-Open-Source-Club/clerk"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+clerk-core = { path = "../clerk-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.44", features = ["full"] }
+anyhow = "1.0"
+base64 = "0.22"
+uuid = { version = "1.16", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3.14"

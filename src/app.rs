@@ -10,7 +10,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
@@ -18,15 +18,18 @@ use tokio_stream::StreamExt;
 use tracing::info;
 use uuid::Uuid;
 
-use crate::agent::{
+use clerk_core::agent::{
     llm::{LlmClient, StreamChunk},
     runner::{ApprovalRequest, PlanExecuteRunner, RunnerEvent},
     session::SessionContext,
 };
-use crate::config::MultimodalConfig;
-use crate::store::{Message, Store};
-use crate::tools::media::read_media_file;
-use crate::tools::registry::ToolRegistry;
+use clerk_core::config::MultimodalConfig;
+use clerk_core::media::{media_kind, with_attachments};
+use clerk_core::prompt::build_system_prompt;
+use clerk_core::store::{Message, Store};
+use clerk_core::text::{format_tool_arguments, format_tool_event};
+use clerk_core::tools::registry::ToolRegistry;
+
 use crate::ui::chat::ChatPanel;
 use crate::ui::input::InputArea;
 
@@ -517,14 +520,7 @@ impl App {
         self.input.clear();
 
         if !self.attachments.is_empty() {
-            let mut descriptions = Vec::new();
-            for path in &self.attachments {
-                match read_media_file(path).await {
-                    Ok(desc) => descriptions.push(format!("附件 {}:\n{}", path.display(), desc)),
-                    Err(e) => descriptions.push(format!("附件 {} 读取失败: {}", path.display(), e)),
-                }
-            }
-            text = format!("{}\n\n{}", text, descriptions.join("\n\n"));
+            text = with_attachments(text, &self.attachments).await;
             self.attachments.clear();
         }
 
@@ -748,122 +744,6 @@ fn spinner_char(frame: usize) -> char {
     FRAMES[frame % FRAMES.len()]
 }
 
-/// 将 runner 工具事件格式化为聊天面板展示文本。
-fn format_tool_event(event: &RunnerEvent) -> String {
-    match event {
-        RunnerEvent::Plan { steps } => {
-            let list = steps
-                .iter()
-                .enumerate()
-                .map(|(i, s)| format!("{}. {}", i + 1, s))
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!("执行计划：\n{}", list)
-        }
-        RunnerEvent::ToolCall { name, arguments } => {
-            let args = format_tool_arguments(name, arguments);
-            format!("调用工具 {}: {}", name, args)
-        }
-        RunnerEvent::ToolResult { name, result } => {
-            let summary = result.chars().take(200).collect::<String>();
-            let ellipsis = if result.chars().count() > 200 {
-                " ..."
-            } else {
-                ""
-            };
-            format!("工具 {} 结果: {}{}", name, summary, ellipsis)
-        }
-        RunnerEvent::Error(e) => format!("工具错误: {}", e),
-    }
-}
-
-/// 将工具参数 JSON 格式化为 `k=v` 列表，供审批与事件展示。
-fn format_tool_arguments(name: &str, arguments: &Value) -> String {
-    match arguments.as_object() {
-        Some(map) => {
-            let parts: Vec<String> = map
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, format_arg_value(name, k, v)))
-                .collect();
-            if parts.is_empty() {
-                "(无参数)".to_string()
-            } else {
-                parts.join(", ")
-            }
-        }
-        None => arguments.to_string(),
-    }
-}
-
-/// 格式化单个参数值；shell 命令、文件内容等长字段超过 120 字符时截断展示。
-fn format_arg_value(tool_name: &str, key: &str, value: &serde_json::Value) -> String {
-    // shell 命令、文件内容等长字段需要截断
-    let is_long_field = matches!(
-        (tool_name, key),
-        ("shell", "command")
-            | ("fs_write", "content")
-            | ("web_fetch", "url")
-            | ("web_post", "url")
-            | ("browser", "url")
-            | ("poster", "input")
-    );
-
-    let s = value.to_string();
-    if is_long_field && s.len() > 120 {
-        format!("{}...（共 {} 字符）", &s[..120], s.len())
-    } else {
-        s
-    }
-}
-
-/// 判断文件是图片还是视频（infer 检测 MIME，失败时按扩展名回退）。
-fn media_kind(path: &Path) -> Option<&'static str> {
-    let mime = infer::get_from_path(path)
-        .ok()
-        .flatten()
-        .map(|k| k.mime_type().to_string())
-        .or_else(|| {
-            let ext = path.extension().and_then(|e| e.to_str())?.to_lowercase();
-            match ext.as_str() {
-                "png" | "jpg" | "jpeg" | "gif" | "webp" => Some("image/unknown".to_string()),
-                "mp4" | "webm" | "mov" | "avi" | "mkv" => Some("video/unknown".to_string()),
-                _ => None,
-            }
-        })?;
-    if mime.starts_with("image/") {
-        Some("image")
-    } else if mime.starts_with("video/") {
-        Some("video")
-    } else {
-        None
-    }
-}
-
-/// 构造系统提示词：说明 Plan-Execute 工作方式与可用工具清单。
-fn build_system_prompt() -> String {
-    r#"你是一个 Plan-Execute 办公 Agent，名为 Clerk。你会先为用户请求制定执行计划，然后逐步执行，最后总结结果。
-你可以使用以下工具帮助用户：
-- fs_read: 读取文件内容
-- fs_write: 写入文件内容
-- fs_list: 列出目录内容
-- shell: 执行 shell 命令
-- web_fetch: 获取网页内容
-- web_post: 发送 POST 请求
-- browser: 使用无头 Chromium 浏览器操作网页、生成 PDF/截图
-- office_read_excel / office_write_excel: Excel 读写
-- office_read_word / office_write_word: Word 读写
-- office_render: 使用 Pandoc 渲染复杂 Word/PDF/PPT（支持模板、公式、图片）
-- pdf_merge / pdf_split: PDF 合并与拆分
-- poster: HTML 转海报 PDF/PNG
-- read_media_file: 读取图片/视频文件并返回 base64 数据 URL
-- render_to_image: 将 HTML/PDF/Office/图片渲染为 PNG 预览图
-- subagent_create / subagent_run / subagent_list / subagent_delete: 创建并运行子 Agent
-- collaborate_parallel / collaborate_sequential: 多子 Agent 并行/顺序协作
-- write_skill: 将领域知识保存为 SKILL.md，供后续复用
-请根据用户需求制定计划、逐步执行，并简洁地总结结果。"#
-        .to_string()
-}
-
 /// 构造一条仅用于 UI 展示的系统消息（不落库，id 为 0）。
 fn system_message(session_id: &str, content: &str) -> Message {
     Message {
@@ -878,10 +758,10 @@ fn system_message(session_id: &str, content: &str) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::llm::{LlmResponse, Message, ToolDefinition};
-    use crate::store::Store;
-    use crate::tools::schema::{Tool, ToolContext, ToolResult, ToolSchema};
     use async_trait::async_trait;
+    use clerk_core::agent::llm::{LlmResponse, Message, ToolDefinition};
+    use clerk_core::store::Store;
+    use clerk_core::tools::schema::{Tool, ToolContext, ToolResult, ToolSchema};
     use serde_json::Value;
     use std::collections::HashMap;
     use tempfile::TempDir;
@@ -1212,39 +1092,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_format_tool_event_shows_details() {
-        let event = RunnerEvent::ToolCall {
-            name: "fs_write".to_string(),
-            arguments: serde_json::json!({
-                "path": "/tmp/foo.html",
-                "content": "hello world"
-            }),
-        };
-        let text = format_tool_event(&event);
-        assert!(text.contains("fs_write"));
-        assert!(text.contains("/tmp/foo.html"));
-
-        let event = RunnerEvent::ToolCall {
-            name: "shell".to_string(),
-            arguments: serde_json::json!({"command": "ls -la"}),
-        };
-        let text = format_tool_event(&event);
-        assert!(text.contains("shell"));
-        assert!(text.contains("ls -la"));
-    }
-
-    #[tokio::test]
-    async fn test_format_plan_event_shows_steps() {
-        let event = RunnerEvent::Plan {
-            steps: vec!["读取文件".to_string(), "总结内容".to_string()],
-        };
-        let text = format_tool_event(&event);
-        assert!(text.contains("执行计划"));
-        assert!(text.contains("1. 读取文件"));
-        assert!(text.contains("2. 总结内容"));
-    }
-
-    #[tokio::test]
     async fn test_handle_key_exit_command() {
         let (mut app, _dir) = create_test_app().await;
         type_text(&mut app, "/exit").await;
@@ -1293,8 +1140,8 @@ mod tests {
 
     // ---- 工具审批 ----
 
-    use crate::agent::llm::{FunctionCall, ToolCall};
-    use crate::config::PermissionConfig;
+    use clerk_core::agent::llm::{FunctionCall, ToolCall};
+    use clerk_core::config::PermissionConfig;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct QueueFakeLlm {
@@ -1590,15 +1437,6 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let has_content = buffer.content.iter().any(|c| !c.symbol().is_empty());
         assert!(has_content);
-    }
-
-    #[test]
-    fn test_build_system_prompt_contains_tools() {
-        let prompt = build_system_prompt();
-        assert!(prompt.contains("subagent_create"));
-        assert!(prompt.contains("write_skill"));
-        assert!(prompt.contains("read_media_file"));
-        assert!(prompt.contains("render_to_image"));
     }
 
     #[test]
