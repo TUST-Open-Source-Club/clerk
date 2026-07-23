@@ -163,11 +163,15 @@ impl Widget for &ChatPanel {
             all_lines.push(Line::from(""));
         }
 
+        // scroll 语义为“距底部多少行”：0 表示底部，值越大越靠上
+        let visible_height = block.inner(area).height as usize;
+        let max_scroll = all_lines.len().saturating_sub(visible_height);
+        let top = max_scroll.saturating_sub(self.scroll as usize);
         let text = Text::from(all_lines);
         Paragraph::new(text)
             .block(block)
             .wrap(Wrap { trim: false })
-            .scroll((self.scroll, 0))
+            .scroll((top as u16, 0))
             .render(area, buf);
     }
 }
@@ -263,7 +267,7 @@ mod tests {
             make_msg("tool", "done"),
             make_msg("unknown", "x"),
         ]);
-        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 10));
+        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 20));
         panel.render(buf.area, &mut buf);
         let text = buf.content.iter().map(|c| c.symbol()).collect::<String>();
         assert!(text.contains("hello"));
@@ -349,6 +353,35 @@ mod tests {
         let text = buf.content.iter().map(|c| c.symbol()).collect::<String>();
         assert!(text.contains("hello"));
         assert!(!text.contains("Clerk v"));
+    }
+
+    #[test]
+    fn test_scroll_zero_shows_bottom() {
+        let mut panel = ChatPanel::new(vec![]);
+        for i in 0..20 {
+            panel.push_message(make_msg("user", &format!("msg {}", i)));
+        }
+        let mut buf = Buffer::empty(Rect::new(0, 0, 30, 5));
+        panel.render(buf.area, &mut buf);
+        let text = buf.content.iter().map(|c| c.symbol()).collect::<String>();
+        assert!(text.contains("msg 19"), "scroll=0 应显示最新消息");
+    }
+
+    #[test]
+    fn test_scroll_up_shows_older_messages() {
+        let mut panel = ChatPanel::new(vec![]);
+        for i in 0..20 {
+            panel.push_message(make_msg("user", &format!("msg {}", i)));
+        }
+        panel.scroll_up(5);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 30, 5));
+        panel.render(buf.area, &mut buf);
+        let text = buf.content.iter().map(|c| c.symbol()).collect::<String>();
+        assert!(
+            text.contains("msg 17") || text.contains("msg 18"),
+            "scroll_up 5 应显示稍早的消息"
+        );
+        assert!(!text.contains("msg 19"), "scroll_up 5 不应显示最新消息");
     }
 
     #[test]
