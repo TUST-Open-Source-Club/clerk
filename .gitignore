@@ -6,3 +6,5 @@ config.toml
 clerk_poster.html
 ~
 .clerk-attachments/
+node_modules/
+dist/

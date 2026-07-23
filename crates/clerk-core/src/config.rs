@@ -134,6 +134,13 @@ impl Default for ContextConfig {
     }
 }
 
+/// 模型信息：用于状态栏展示与 /model 命令。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub model: String,
+    pub base_url: String,
+}
+
 /// Clerk 顶层配置，对应 config.toml。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {

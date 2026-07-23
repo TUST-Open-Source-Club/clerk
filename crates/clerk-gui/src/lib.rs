@@ -21,7 +21,7 @@ use clerk_core::agent::llm::LlmClient;
 use clerk_core::agent::runner::{ApprovalRequest, PlanExecuteRunner, RunnerEvent};
 use clerk_core::agent::session::SessionContext;
 use clerk_core::bootstrap::{create_llm_client, create_tool_registry};
-use clerk_core::config::{Config, MultimodalConfig};
+use clerk_core::config::{Config, ModelInfo, MultimodalConfig};
 use clerk_core::media::{media_kind, with_attachments};
 use clerk_core::prompt::build_system_prompt;
 use clerk_core::store::Store;
@@ -38,6 +38,7 @@ struct GuiState {
     registry: Arc<Mutex<ToolRegistry>>,
     multimodal: MultimodalConfig,
     context: clerk_core::config::ContextConfig,
+    model_info: clerk_core::config::ModelInfo,
     working_dir: PathBuf,
     /// 已附加、等待随下一条消息发送的媒体文件
     attachments: Mutex<Vec<PathBuf>>,
@@ -141,11 +142,45 @@ async fn init_state() -> Result<GuiState> {
         registry,
         multimodal: config.multimodal.clone(),
         context: config.context.clone(),
+        model_info: ModelInfo {
+            model: config.llm.model.clone(),
+            base_url: config.llm.base_url.clone(),
+        },
         working_dir,
         attachments: Mutex::new(Vec::new()),
         pending_approval: Mutex::new(None),
         streaming: Mutex::new(false),
     })
+}
+
+/// 获取会话元数据（模型、工作目录、会话 ID、YOLO 状态）。
+#[tauri::command]
+async fn get_session_meta(state: State<'_, GuiState>) -> Result<SessionMeta, String> {
+    let yolo = state
+        .registry
+        .lock()
+        .await
+        .context()
+        .permissions
+        .as_ref()
+        .is_some_and(|p| p.yolo);
+    Ok(SessionMeta {
+        session_id: state.session_id.clone(),
+        model: state.model_info.model.clone(),
+        base_url: state.model_info.base_url.clone(),
+        working_dir: state.working_dir.display().to_string(),
+        yolo,
+    })
+}
+
+/// 会话元数据。
+#[derive(Clone, Serialize)]
+struct SessionMeta {
+    session_id: String,
+    model: String,
+    base_url: String,
+    working_dir: String,
+    yolo: bool,
 }
 
 /// 发送用户消息：拼接附件描述、持久化，然后驱动 PlanExecuteRunner，
@@ -586,6 +621,7 @@ pub fn run() {
             save_file,
             save_file_as,
             respond_approval,
+            get_session_meta,
         ])
         .run(tauri::generate_context!())
         .expect("运行 clerk-gui 失败");

@@ -1,26 +1,13 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Clerk</title>
-    <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <div id="app">
-      <header id="titlebar">Clerk — 办公 AI Agent</header>
-      <main id="chat"></main>
-      <div id="attachments"></div>
-      <div id="composer">
-        <textarea
-          id="input"
-          rows="3"
-          placeholder="输入消息，Enter 发送，Shift+Enter 换行；可直接粘贴图片/视频"
-        ></textarea>
-        <button id="send">发送</button>
-      </div>
-      <footer id="status">就绪</footer>
-    </div>
-    <script src="app.js"></script>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

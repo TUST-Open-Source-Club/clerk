@@ -298,3 +298,10 @@ cargo build --release --package clerk-gui
 - 你不需要决定文件放哪，目录结构在第三节。
 - 你只需要按第六节 Step 1 → Step 8 顺序实现。
 - 如果遇到不确定，回到本计划文档查找，不要自己发明。
+## 十、补充说明（Review 后修订）
+
+- pnpm 11 对 esbuild 的 postinstall 有安全限制，交互式环境下会提示 pnpm approve-builds。CI 或自动构建时请使用 CI=true pnpm install && CI=true pnpm build。
+- 已把 @element-plus/icons-vue 显式加入 dependencies。
+- 文件卡片现在会正确挂到流式消息上，而不是错误地挂到上一条用户消息。
+- 已补充 get_session_meta 后端命令，前端启动时会加载模型、工作目录、会话 ID 与 YOLO 状态。
+- 已添加系统深色模式跟随。
