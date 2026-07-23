@@ -117,6 +117,7 @@ impl Store {
     }
 
     /// 向会话追加一条消息（同时刷新会话的 updated_at）。
+    /// 若为会话首条用户消息，则把会话标题更新为消息内容的前 30 个字符。
     pub async fn add_message(
         &self,
         session_id: &str,
@@ -136,7 +137,33 @@ impl Store {
         .context("插入消息失败")?
         .get::<i64, _>("id");
 
+        if role == "user" {
+            self.update_title_from_first_message(session_id, content)
+                .await?;
+        }
+
         self.get_message(id).await
+    }
+
+    /// 若会话标题仍为默认或空，则用首条用户消息更新标题。
+    async fn update_title_from_first_message(&self, session_id: &str, content: &str) -> Result<()> {
+        let session = self.get_session(session_id).await?;
+        if let Some(session) = session {
+            let is_default = session.title.is_none()
+                || session.title.as_deref().is_some_and(|t| {
+                    t == "新会话" || t == "恢复会话" || t == "GUI 会话" || t == "命令会话"
+                });
+            if is_default {
+                let title = content.chars().take(30).collect::<String>();
+                sqlx::query("UPDATE sessions SET title = ? WHERE id = ?")
+                    .bind(title)
+                    .bind(session_id)
+                    .execute(&self.pool)
+                    .await
+                    .context("更新会话标题失败")?;
+            }
+        }
+        Ok(())
     }
 
     /// 按自增 ID 获取消息。
@@ -236,6 +263,29 @@ mod tests {
         assert_eq!(messages[0].content, "hello");
         assert_eq!(messages[1].content, "hi");
         assert_eq!(messages[1].id, m2.id);
+    }
+
+    #[tokio::test]
+    async fn test_first_user_message_sets_title() {
+        let (store, _dir) = create_test_store().await;
+        store.create_session("s1", Some("新会话")).await.unwrap();
+        store
+            .add_message("s1", "user", "帮我写一个海报")
+            .await
+            .unwrap();
+        let session = store.get_session("s1").await.unwrap().unwrap();
+        assert_eq!(session.title.as_deref(), Some("帮我写一个海报"));
+    }
+
+    #[tokio::test]
+    async fn test_title_not_overwritten_after_first_message() {
+        let (store, _dir) = create_test_store().await;
+        store.create_session("s1", Some("新会话")).await.unwrap();
+        store.add_message("s1", "user", "第一条消息").await.unwrap();
+        store.add_message("s1", "assistant", "回复").await.unwrap();
+        store.add_message("s1", "user", "第二条消息").await.unwrap();
+        let session = store.get_session("s1").await.unwrap().unwrap();
+        assert_eq!(session.title.as_deref(), Some("第一条消息"));
     }
 
     #[tokio::test]

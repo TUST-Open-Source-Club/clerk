@@ -358,12 +358,18 @@ impl App {
                 }
             }
             KeyCode::Char(c) => {
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && c == 'c'
-                    && self.status == AppStatus::Streaming
-                {
-                    if let Some(abort) = self.stream_abort.take() {
-                        abort.abort();
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    match c {
+                        'c' if self.status == AppStatus::Streaming => {
+                            if let Some(abort) = self.stream_abort.take() {
+                                abort.abort();
+                            }
+                        }
+                        'j' => self.chat.scroll_down(3),
+                        'k' => self.chat.scroll_up(3),
+                        'h' => self.chat.scroll_up(1),
+                        'l' => self.chat.scroll_down(1),
+                        _ => self.input.insert_char(c),
                     }
                 } else {
                     self.input.insert_char(c);
@@ -382,18 +388,28 @@ impl App {
                 self.input.move_right();
             }
             KeyCode::Up => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    || key.modifiers.contains(KeyModifiers::CONTROL)
+                {
                     self.chat.scroll_up(3);
                 } else {
                     self.input.move_up();
                 }
             }
             KeyCode::Down => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    || key.modifiers.contains(KeyModifiers::CONTROL)
+                {
                     self.chat.scroll_down(3);
                 } else {
                     self.input.move_down();
                 }
+            }
+            KeyCode::PageUp => {
+                self.chat.scroll_up(10);
+            }
+            KeyCode::PageDown => {
+                self.chat.scroll_down(10);
             }
             KeyCode::Home => {
                 self.input.move_home();
@@ -686,6 +702,7 @@ impl App {
             .add_message(&self.session_id, "user", &text)
             .await?;
         self.chat.push_message(user_msg);
+        self.chat.scroll_to_bottom();
 
         self.status = AppStatus::Streaming;
         self.tool_events.clear();

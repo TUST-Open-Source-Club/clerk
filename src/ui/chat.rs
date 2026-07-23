@@ -13,6 +13,8 @@ use clerk_core::store::Message;
 pub struct ChatPanel {
     messages: Vec<Message>,
     scroll: u16,
+    /// 当前是否位于聊天历史底部；只有为 true 时新内容才自动滚到底部
+    at_bottom: bool,
 }
 
 impl ChatPanel {
@@ -20,26 +22,44 @@ impl ChatPanel {
         Self {
             messages,
             scroll: 0,
+            at_bottom: true,
         }
     }
 
     pub fn scroll_up(&mut self, amount: u16) {
         self.scroll = self.scroll.saturating_add(amount);
+        self.at_bottom = false;
     }
 
     pub fn scroll_down(&mut self, amount: u16) {
         self.scroll = self.scroll.saturating_sub(amount);
+        if self.scroll == 0 {
+            self.at_bottom = true;
+        }
+    }
+
+    /// 强制滚动到底部。
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll = 0;
+        self.at_bottom = true;
     }
 
     pub fn push_message(&mut self, message: Message) {
+        let keep_at_bottom = self.at_bottom;
         self.messages.push(message);
-        self.scroll = 0;
+        if keep_at_bottom {
+            self.scroll = 0;
+        }
     }
 
     /// 更新最后一条消息的内容（流式渲染用）；无消息时返回 false。
     pub fn update_last_message(&mut self, content: impl Into<String>) -> bool {
+        let keep_at_bottom = self.at_bottom;
         if let Some(last) = self.messages.last_mut() {
             last.content = content.into();
+            if keep_at_bottom {
+                self.scroll = 0;
+            }
             true
         } else {
             false
@@ -47,8 +67,9 @@ impl ChatPanel {
     }
 
     pub fn pop_last(&mut self) -> Option<Message> {
+        let keep_at_bottom = self.at_bottom;
         let msg = self.messages.pop();
-        if msg.is_some() {
+        if msg.is_some() && keep_at_bottom {
             self.scroll = 0;
         }
         msg
@@ -67,8 +88,12 @@ impl ChatPanel {
     /// 移除指定下标的消息（撤下加载占位用）；越界时返回 None。
     pub fn remove_message_at(&mut self, index: usize) -> Option<Message> {
         if index < self.messages.len() {
-            self.scroll = 0;
-            Some(self.messages.remove(index))
+            let keep_at_bottom = self.at_bottom;
+            let msg = self.messages.remove(index);
+            if keep_at_bottom {
+                self.scroll = 0;
+            }
+            Some(msg)
         } else {
             None
         }
@@ -77,11 +102,13 @@ impl ChatPanel {
     pub fn set_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
         self.scroll = 0;
+        self.at_bottom = true;
     }
 
     pub fn clear(&mut self) {
         self.messages.clear();
         self.scroll = 0;
+        self.at_bottom = true;
     }
 
     pub fn messages(&self) -> &[Message] {
@@ -271,6 +298,36 @@ mod tests {
         panel.clear();
         assert!(panel.messages.is_empty());
         assert_eq!(panel.scroll, 0);
+    }
+
+    #[test]
+    fn test_auto_scroll_only_when_at_bottom() {
+        let mut panel = ChatPanel::new(vec![make_msg("user", "hello")]);
+        // 初始位于底部，新消息应保持在底部
+        panel.push_message(make_msg("assistant", "hi"));
+        assert_eq!(panel.scroll, 0);
+
+        // 用户向上滚动后不再位于底部
+        panel.scroll_up(2);
+        assert_eq!(panel.scroll, 2);
+        panel.push_message(make_msg("user", "new"));
+        assert_eq!(panel.scroll, 2, "不在底部时不应自动滚动");
+
+        // 回到底部后再来消息应自动跟随
+        panel.scroll_to_bottom();
+        panel.push_message(make_msg("assistant", "reply"));
+        assert_eq!(panel.scroll, 0);
+    }
+
+    #[test]
+    fn test_update_last_message_keeps_bottom() {
+        let mut panel = ChatPanel::new(vec![make_msg("assistant", "old")]);
+        panel.update_last_message("new");
+        assert_eq!(panel.scroll, 0);
+
+        panel.scroll_up(1);
+        panel.update_last_message("newer");
+        assert_eq!(panel.scroll, 1);
     }
 
     #[test]
