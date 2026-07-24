@@ -44,19 +44,27 @@ impl SessionContext {
         }
     }
 
-    /// 当历史消息超过阈值时，将旧消息压缩为一条摘要。
+    /// 当历史消息达到阈值的 80% 时，将旧消息压缩为一条摘要。
     /// 返回 true 表示发生了压缩。
     pub async fn maybe_compress(
         &mut self,
         client: &dyn crate::agent::llm::LlmClient,
         config: &ContextConfig,
     ) -> anyhow::Result<bool> {
-        if self.messages.len() <= config.max_messages {
+        let threshold = (config.max_messages as f32 * 0.8) as usize;
+        if self.messages.len() < threshold {
             return Ok(false);
         }
         if config.compression_summary_keep >= self.messages.len() {
             return Ok(false);
         }
+
+        tracing::info!(
+            "上下文压缩触发: {} 条消息，阈值 {}（{}%）",
+            self.messages.len(),
+            threshold,
+            80
+        );
 
         let split = self.messages.len() - config.compression_summary_keep;
         let old_messages = self.messages.drain(0..split).collect::<Vec<_>>();
@@ -133,13 +141,14 @@ mod tests {
         }
 
         let mut ctx = SessionContext::new("sys");
-        for i in 0..10 {
+        for i in 0..8 {
             ctx.add_message(Message::user(format!("msg {}", i)));
         }
         let config = ContextConfig {
-            max_messages: 5,
+            max_messages: 10,
             compression_summary_keep: 2,
         };
+        // 8 条消息 = 80% 的 10，应触发压缩
         let compressed = ctx.maybe_compress(&FakeLlm, &config).await.unwrap();
         assert!(compressed);
         assert_eq!(ctx.messages.len(), 3);

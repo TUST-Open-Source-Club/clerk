@@ -106,8 +106,10 @@ impl PlanExecuteRunner {
         event_tx: Option<mpsc::UnboundedSender<RunnerEvent>>,
     ) -> Result<String> {
         ctx.add_message(Message::user(user_input));
+        self.compress_if_needed(ctx).await?;
         let steps = self.generate_plan(ctx, event_tx.as_ref()).await?;
         self.execute_plan(ctx, steps, event_tx.as_ref()).await?;
+        self.compress_if_needed(ctx).await?;
         self.summarize(ctx).await
     }
 
@@ -130,7 +132,8 @@ impl PlanExecuteRunner {
         }
 
         let messages = {
-            let ctx = ctx.lock().await;
+            let mut ctx = ctx.lock().await;
+            self.compress_if_needed(&mut ctx).await?;
             let mut messages = ctx.build_messages();
             messages.push(Message::user(SUMMARY_PROMPT));
             messages
